@@ -8,9 +8,9 @@ A high-performance cryptocurrency mining application written in Rust with GPU ac
 
 - **Cross-Platform** - Runs on Linux and Windows
 - **CUDA Support** (Primary) - Maximum performance on NVIDIA GPUs
-- **OpenCL Support** (Fallback) - Cross-platform GPU compatibility
-- **CPU Mining** - Fallback for systems without GPU
-- **Multi-threaded** - Efficient CPU mining with Rayon
+- **OpenCL Support** (Fallback) - AMD/Intel GPU compatibility
+- **GPU Required** - No CPU fallback mining (GPU is mandatory)
+- **Multi-threaded** - Efficient parallel processing with Rayon
 - **High Performance** - Optimized for speed with zero-copy operations
 
 ## 🚀 Quick Start
@@ -45,31 +45,33 @@ For detailed setup instructions, see [QUICKSTART.md](QUICKSTART.md) or [SETUP.md
 ## 🎯 Hardware Requirements
 
 ### Minimum
+- **GPU: REQUIRED** - NVIDIA GTX 1050 Ti or AMD RX 560 (minimum)
 - CPU: Multi-core processor (4+ cores recommended)
 - RAM: 4GB
 - OS: Linux (Ubuntu 20.04+, Fedora 35+) or Windows 10/11 (64-bit)
 
 ### Recommended
+- **GPU: NVIDIA GTX 1660 or better (CUDA preferred)**
 - CPU: 8+ cores (e.g., AMD Ryzen 5/7, Intel Core i5/i7)
-- GPU: NVIDIA GTX 1060 or better (for CUDA)
 - RAM: 8GB+
 - OS: Linux (Ubuntu 22.04+) or Windows 11
+
+**⚠️ Important**: This application requires a GPU. Systems without a GPU cannot mine.
 
 ## 🔧 Build Options
 
 ```bash
-# CPU-only build
-cargo build --release --features cpu-only
-
-# CUDA build (NVIDIA GPUs - best performance)
+# CUDA build (NVIDIA GPUs - best performance, recommended)
 cargo build --release --features cuda
 
 # OpenCL build (AMD/Intel GPUs)
 cargo build --release --features opencl
 
-# All backends (auto-detect best available)
+# All backends (auto-detect best available GPU)
 cargo build --release --features all-backends
 ```
+
+**Note**: CPU-only builds are not supported. A GPU is required for mining.
 
 ## 📊 Performance
 
@@ -79,8 +81,12 @@ Approximate hash rates (varies by hardware):
 |----------|-----------|-----------|
 | GTX 1660 SUPER (CUDA) | SHA256 | ~600 MH/s |
 | GTX 1660 SUPER (CUDA) | Ethash | ~26 MH/s |
-| Ryzen 5 5600X (12 threads) | SHA256 | ~10 MH/s |
-| Ryzen 5 5600X (12 threads) | Ethash | ~0.5 MH/s |
+| GTX 1050 Ti (CUDA) | SHA256 | ~250 MH/s |
+| GTX 1050 Ti (CUDA) | Ethash | ~11 MH/s |
+| RX 580 (OpenCL) | SHA256 | ~400 MH/s |
+| RX 580 (OpenCL) | Ethash | ~20 MH/s |
+
+**Note**: CPU mining is not supported. GPU is required.
 
 ## 🏗️ Architecture
 
@@ -91,12 +97,13 @@ rust-miner/
 │   ├── mining/           # Mining engine
 │   │   ├── engine.rs     # Core mining logic
 │   │   ├── cuda.rs       # CUDA backend (primary)
-│   │   ├── opencl.rs     # OpenCL backend (fallback)
-│   │   └── cpu.rs        # CPU fallback
+│   │   └── opencl.rs     # OpenCL backend (fallback)
 │   ├── blockchain/       # Blockchain interface
 │   └── utils/            # Utilities and helpers
 └── benches/              # Benchmarks
 ```
+
+**Note**: No CPU mining implementation. GPU backends only.
 
 ## 🧪 Testing
 

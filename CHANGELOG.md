@@ -8,12 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- **GPU Required**: Removed CPU mining fallback
+  - GPU (CUDA or OpenCL) is now mandatory
+  - Application exits with error if no GPU detected
+  - Updated all documentation to reflect GPU requirement
+  - Backend detection returns Result instead of falling back to CPU
 - **Cross-Platform Support**: Project now officially supports both Linux and Windows
   - Platform-agnostic code patterns required
   - Conditional compilation for OS-specific features
   - Cross-platform path handling with `std::path`
   - Windows-specific dependencies added
   - Platform-specific testing strategies
+
+### Removed
+- CPU mining support (GPU is mandatory)
+- `cpu-only` feature flag
+- CPU fallback in backend auto-detection
 
 ### Planned
 - Mining engine implementation

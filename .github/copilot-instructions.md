@@ -5,6 +5,8 @@ This is a high-performance Rust-based cryptocurrency mining application with GPU
 
 **Cross-Platform Support**: Linux and Windows are both first-class targets. All code must be platform-agnostic or use conditional compilation when platform-specific features are required.
 
+**GPU Required**: This application requires a GPU for mining. There is no CPU mining fallback. Systems without a compatible GPU (CUDA or OpenCL) cannot mine.
+
 ## Development Setup
 
 ### Building and Running
@@ -176,28 +178,24 @@ candidates.par_iter()
   - `cudarc` crate for CUDA support (modern, safe Rust bindings)
   - Direct access to NVIDIA GPU features and optimizations
   - Best performance on NVIDIA hardware (GTX/RTX series)
-- **Secondary: OpenCL**: Fallback for cross-platform compatibility
+- **Secondary: OpenCL**: Fallback for AMD/Intel GPUs
   - `ocl` crate for OpenCL in Rust
   - Used when CUDA is not available or for AMD/Intel GPUs
-- **Experimental: WebGPU**: Future cross-platform option
-  - `wgpu` for compute shaders (still maturing)
-- **Hybrid CPU/GPU Strategy**: Balance workload between CPU and GPU
+- **No CPU Fallback**: GPU is mandatory for mining
+  - Application will exit gracefully if no GPU is detected
+  - Display helpful error message directing user to GPU requirements
+- **Hybrid CPU/GPU Strategy**: Balance GPU workload with CPU coordination
 ```rust
-// Example: Distribute work based on capabilities
-let cpu_workers = num_cpus::get() - 1; // Leave one for coordination
-let gpu_available = detect_gpu_support();
+// Example: GPU handles all mining, CPU coordinates
+let gpu_available = detect_gpu_support()?;
 
-if gpu_available {
-    // GPU handles bulk of nonce space
-    let gpu_range = 0..u32::MAX / 2;
-    spawn_gpu_miners(gpu_range);
-    
-    // CPU handles remaining + fallback
-    let cpu_range = u32::MAX / 2..u32::MAX;
-    spawn_cpu_miners(cpu_range, cpu_workers);
-} else {
-    spawn_cpu_miners(0..u32::MAX, cpu_workers);
-}
+// GPU does the mining
+spawn_gpu_miners(0..u64::MAX)?;
+
+// CPU handles coordination tasks only (not mining)
+// - Network communication
+// - Result validation
+// - Statistics tracking
 ```
 
 - **Memory Transfer Optimization**: Minimize CPU↔GPU data transfers
@@ -308,40 +306,34 @@ impl MultiGpuMiner {
 }
 ```
 
-- **Backend Priority Strategy**: CUDA → OpenCL → CPU
+- **Backend Priority Strategy**: CUDA → OpenCL → Exit with error
 ```rust
 pub enum MiningBackend {
     Cuda(CudaMiner),
     OpenCL(OpenClMiner),
-    Cpu(CpuMiner),
-    Hybrid { primary: Box<MiningBackend>, cpu: CpuMiner },
 }
 
 impl MiningBackend {
-    pub fn auto_detect() -> Self {
+    pub fn auto_detect() -> Result<Self, String> {
         // Priority 1: Try CUDA (best performance on NVIDIA)
         if let Ok(cuda) = CudaMiner::try_new() {
             log::info!("Using CUDA backend (NVIDIA GPU)");
-            let cpu = CpuMiner::new(2); // Keep 2 CPU threads for coordination
-            return Self::Hybrid { 
-                primary: Box::new(Self::Cuda(cuda)), 
-                cpu 
-            };
+            return Ok(Self::Cuda(cuda));
         }
         
         // Priority 2: Try OpenCL (AMD/Intel GPUs or NVIDIA fallback)
         if let Ok(opencl) = OpenClMiner::try_new() {
-            log::info!("Using OpenCL backend (fallback)");
-            let cpu = CpuMiner::new(2);
-            return Self::Hybrid { 
-                primary: Box::new(Self::OpenCL(opencl)), 
-                cpu 
-            };
+            log::info!("Using OpenCL backend");
+            return Ok(Self::OpenCL(opencl));
         }
         
-        // Priority 3: CPU only
-        log::warn!("No GPU detected, using CPU-only mining");
-        Self::Cpu(CpuMiner::new(num_cpus::get()))
+        // No GPU found - cannot mine
+        Err("No compatible GPU detected. This application requires a GPU with CUDA or OpenCL support. \
+             Please ensure:\n\
+             - GPU drivers are installed\n\
+             - CUDA Toolkit installed (for NVIDIA)\n\
+             - OpenCL runtime installed (for AMD/Intel)\n\
+             See SETUP.md for installation instructions.".to_string())
     }
 }
 ```
@@ -390,10 +382,11 @@ pub struct MiningEngine<C: BlockchainClient> {
 ### Expected Components
 When developing this project, consider these typical mining application components:
 
-- **Mining Engine** (`src/mining/`): Core hashing/proof-of-work logic
-  - `engine.rs`: Main mining loop and nonce iteration
-  - `hasher.rs`: Optimized hashing implementations
-  - `difficulty.rs`: Difficulty calculation and validation
+- **Mining Engine** (`src/mining/`): GPU-only hashing/proof-of-work logic
+  - `engine.rs`: Main mining loop and work distribution
+  - `cuda.rs`: CUDA backend implementation (primary)
+  - `opencl.rs`: OpenCL backend implementation (fallback)
+  - `backend.rs`: Backend trait and auto-detection
 - **Blockchain Interface** (`src/blockchain/`): Connection to blockchain network
   - `client.rs`: Network communication with blockchain nodes
   - `block.rs`: Block structure and validation
@@ -402,11 +395,14 @@ When developing this project, consider these typical mining application componen
   - Load from TOML/JSON files
   - Environment variable overrides
   - Validation on startup
+  - GPU detection and selection
 - **Logging** (`src/logging.rs`): Structured logging for monitoring performance
   - Use `tracing` for async-aware logging
-  - Include metrics: hash rate, blocks found, network latency
+  - Include metrics: hash rate, blocks found, network latency, GPU temp
 - **CLI** (`src/cli.rs`): Command-line interface for user interaction
   - Use `clap` with derive macros for argument parsing
+  - GPU listing and selection
+  - Mining pool configuration
 
 ### Module Organization
 ```
@@ -418,8 +414,9 @@ src/
 ├── mining/
 │   ├── mod.rs           # Public API
 │   ├── engine.rs        # Mining logic
-│   ├── hasher.rs        # Hash implementations
-│   └── worker.rs        # Worker thread management
+│   ├── backend.rs       # Backend trait and detection
+│   ├── cuda.rs          # CUDA implementation
+│   └── opencl.rs        # OpenCL implementation
 ├── blockchain/
 │   ├── mod.rs
 │   ├── client.rs        # Network client
@@ -432,7 +429,7 @@ src/
 └── utils/
     ├── mod.rs
     ├── metrics.rs       # Performance metrics
-    └── crypto.rs        # Cryptographic primitives
+    └── gpu.rs           # GPU detection and info
 ```
 
 ### Performance Profiling Workflow
@@ -500,11 +497,11 @@ which = "6.0"             # Find executables in PATH (cross-platform)
 
 [features]
 default = ["cuda"]                                     # Default to CUDA (NVIDIA GPUs)
-cpu-only = []
 cuda = ["dep:cudarc", "dep:cuda-sys"]                 # PRIMARY backend
 opencl = ["dep:ocl"]                                   # FALLBACK backend
 gpu = ["cuda"]                                         # Alias to CUDA (preferred)
-all-backends = ["cuda", "opencl", "dep:wgpu"]         # All GPU backends
+all-backends = ["cuda", "opencl"]                      # All GPU backends (no CPU)
+
 
 [target.'cfg(windows)'.dependencies]
 # Windows-specific dependencies
