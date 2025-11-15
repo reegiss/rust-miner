@@ -1,0 +1,38 @@
+# Rust
+/target/
+Cargo.lock
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+
+# Benchmarks
+/benches/target/
+
+# Profiling
+flamegraph.svg
+perf.data
+perf.data.old
+*.prof
+
+# OS
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Build artifacts
+*.so
+*.dylib
+*.dll
+*.a

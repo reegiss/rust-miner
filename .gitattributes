@@ -1,0 +1,21 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+
+# Rust source files
+*.rs text eol=lf
+
+# Documentation
+*.md text eol=lf
+
+# Configuration files
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+
+# Scripts
+*.sh text eol=lf
+
+# Ensure line endings in checkout
+*.cu text eol=lf
+*.cl text eol=lf
