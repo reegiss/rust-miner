@@ -2,8 +2,11 @@
 
 A high-performance cryptocurrency mining application written in Rust with GPU acceleration support.
 
+**Cross-Platform**: Runs on both Linux and Windows with identical features and performance.
+
 ## ⚡ Features
 
+- **Cross-Platform** - Runs on Linux and Windows
 - **CUDA Support** (Primary) - Maximum performance on NVIDIA GPUs
 - **OpenCL Support** (Fallback) - Cross-platform GPU compatibility
 - **CPU Mining** - Fallback for systems without GPU
@@ -12,6 +15,7 @@ A high-performance cryptocurrency mining application written in Rust with GPU ac
 
 ## 🚀 Quick Start
 
+### Linux
 ```bash
 # 1. Run automated setup
 bash setup.sh
@@ -23,6 +27,19 @@ cargo build --release --features cuda
 ./target/release/rust-miner
 ```
 
+### Windows
+```powershell
+# 1. Install Rust from https://rustup.rs/
+
+# 2. Install CUDA Toolkit from NVIDIA website
+
+# 3. Build with CUDA
+cargo build --release --features cuda
+
+# 4. Run
+.\target\release\rust-miner.exe
+```
+
 For detailed setup instructions, see [QUICKSTART.md](QUICKSTART.md) or [SETUP.md](SETUP.md).
 
 ## 🎯 Hardware Requirements
@@ -30,13 +47,13 @@ For detailed setup instructions, see [QUICKSTART.md](QUICKSTART.md) or [SETUP.md
 ### Minimum
 - CPU: Multi-core processor (4+ cores recommended)
 - RAM: 4GB
-- OS: Linux, macOS, or Windows
+- OS: Linux (Ubuntu 20.04+, Fedora 35+) or Windows 10/11 (64-bit)
 
 ### Recommended
 - CPU: 8+ cores (e.g., AMD Ryzen 5/7, Intel Core i5/i7)
 - GPU: NVIDIA GTX 1060 or better (for CUDA)
 - RAM: 8GB+
-- OS: Linux (Ubuntu 20.04+)
+- OS: Linux (Ubuntu 22.04+) or Windows 11
 
 ## 🔧 Build Options
 

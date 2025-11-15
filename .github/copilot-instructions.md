@@ -3,18 +3,21 @@
 ## Project Overview
 This is a high-performance Rust-based cryptocurrency mining application with GPU acceleration. The project prioritizes CUDA for NVIDIA GPUs, with OpenCL as fallback and CPU mining as last resort.
 
+**Cross-Platform Support**: Linux and Windows are both first-class targets. All code must be platform-agnostic or use conditional compilation when platform-specific features are required.
+
 ## Development Setup
 
 ### Building and Running
 ```bash
-# Build the project
+# Build the project (cross-platform)
 cargo build
 
 # Run in development mode
 cargo run
 
 # Run with release optimizations (CPU only)
-cargo build --release && ./target/release/rust-miner
+cargo build --release && ./target/release/rust-miner  # Linux/macOS
+cargo build --release && .\target\release\rust-miner.exe  # Windows
 
 # Build with CUDA support (PREFERRED - NVIDIA GPUs)
 cargo build --release --features cuda
@@ -48,6 +51,53 @@ cargo bench --bench mining_bench --features cuda
 
 # Benchmark all backends
 cargo bench --features all-backends
+```
+
+### Platform-Specific Considerations
+
+#### Linux
+- Preferred development platform
+- Native CUDA support via CUDA Toolkit
+- OpenCL via Mesa/ICD loaders
+- Use `perf` for profiling
+- Shared library extension: `.so`
+
+#### Windows
+- CUDA via CUDA Toolkit for Windows
+- OpenCL via vendor-specific drivers
+- Use Windows Performance Analyzer for profiling
+- Shared library extension: `.dll`
+- Consider using WSL2 for Linux-like development experience
+
+#### Cross-Platform Best Practices
+- **Path Handling**: Always use `std::path::Path` and `PathBuf`, never hardcode separators
+```rust
+// Good - cross-platform
+use std::path::PathBuf;
+let config_path = PathBuf::from("config").join("settings.toml");
+
+// Bad - Linux-only
+let config_path = "config/settings.toml";
+```
+
+- **Line Endings**: Let `.gitattributes` handle it, use `\n` in code
+- **File System**: Use `std::fs` and handle case sensitivity differences
+- **Process Spawning**: Use `std::process::Command` with platform-specific args
+```rust
+#[cfg(target_os = "windows")]
+const NVCC: &str = "nvcc.exe";
+
+#[cfg(not(target_os = "windows"))]
+const NVCC: &str = "nvcc";
+```
+
+- **Dynamic Libraries**: Use conditional compilation for library loading
+```rust
+#[cfg(target_os = "linux")]
+const CUDA_LIB: &str = "libcudart.so";
+
+#[cfg(target_os = "windows")]
+const CUDA_LIB: &str = "cudart64_XX.dll";
 ```
 
 ## Code Conventions
@@ -444,6 +494,10 @@ clap = { version = "4.4", features = ["derive"] }
 sha2 = "0.10"
 blake3 = "1.5"            # Fast hashing for mining
 
+# Cross-platform utilities
+dirs = "5.0"              # Standard user directories (cross-platform)
+which = "6.0"             # Find executables in PATH (cross-platform)
+
 [features]
 default = ["cuda"]                                     # Default to CUDA (NVIDIA GPUs)
 cpu-only = []
@@ -451,12 +505,42 @@ cuda = ["dep:cudarc", "dep:cuda-sys"]                 # PRIMARY backend
 opencl = ["dep:ocl"]                                   # FALLBACK backend
 gpu = ["cuda"]                                         # Alias to CUDA (preferred)
 all-backends = ["cuda", "opencl", "dep:wgpu"]         # All GPU backends
+
+[target.'cfg(windows)'.dependencies]
+# Windows-specific dependencies
+windows-sys = { version = "0.52", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[target.'cfg(unix)'.dependencies]
+# Unix/Linux-specific dependencies (if needed)
+libc = "0.2"
 ```
 
 ### Testing Strategy
 - Unit tests: Place in the same file as the code using `#[cfg(test)]` modules
 - Integration tests: Place in `tests/` directory
 - Test critical paths: hashing functions, network communication, data validation
+- **Platform-specific tests**: Use `#[cfg(target_os = "...")]` for OS-specific functionality
+```rust
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_cross_platform_feature() {
+        // Test that works on all platforms
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_linux_specific() {
+        // Linux-only test
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_windows_specific() {
+        // Windows-only test
+    }
+}
+```
 
 ## Dependencies Management
 - Keep `Cargo.toml` organized with comments for dependency groups

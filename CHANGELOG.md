@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Cross-Platform Support**: Project now officially supports both Linux and Windows
+  - Platform-agnostic code patterns required
+  - Conditional compilation for OS-specific features
+  - Cross-platform path handling with `std::path`
+  - Windows-specific dependencies added
+  - Platform-specific testing strategies
+
 ### Planned
 - Mining engine implementation
 - CUDA kernel development
