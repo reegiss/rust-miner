@@ -1,0 +1,316 @@
+use super::protocol::{StratumError, StratumRequest, StratumResponse, StratumJob, StratumResult, StratumMethod};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+/// Stratum client configuration
+#[derive(Debug, Clone)]
+pub struct StratumConfig {
+    /// Pool URL (e.g., "pool.example.com:3333")
+    pub url: String,
+    
+    /// Worker username (wallet address + worker name)
+    pub username: String,
+    
+    /// Worker password (usually "x")
+    pub password: String,
+    
+    /// User agent string
+    pub user_agent: String,
+    
+    /// Connection timeout in seconds
+    pub timeout_secs: u64,
+}
+
+impl StratumConfig {
+    pub fn new(url: String, username: String, password: String) -> Self {
+        Self {
+            url,
+            username,
+            password,
+            user_agent: format!("rust-miner/{}", env!("CARGO_PKG_VERSION")),
+            timeout_secs: 30,
+        }
+    }
+}
+
+/// Stratum client for mining pool communication
+pub struct StratumClient {
+    config: StratumConfig,
+    writer: Arc<Mutex<Option<WriteHalf<TcpStream>>>>,
+    request_id: Arc<Mutex<u64>>,
+    job_receiver: Arc<Mutex<mpsc::UnboundedReceiver<StratumJob>>>,
+    job_sender: mpsc::UnboundedSender<StratumJob>,
+    response_receiver: Arc<Mutex<mpsc::UnboundedReceiver<StratumResponse>>>,
+    response_sender: mpsc::UnboundedSender<StratumResponse>,
+}
+
+impl StratumClient {
+    pub fn new(config: StratumConfig) -> Self {
+        let (job_sender, job_receiver) = mpsc::unbounded_channel();
+        let (response_sender, response_receiver) = mpsc::unbounded_channel();
+        
+        Self {
+            config,
+            writer: Arc::new(Mutex::new(None)),
+            request_id: Arc::new(Mutex::new(0)),
+            job_receiver: Arc::new(Mutex::new(job_receiver)),
+            job_sender,
+            response_receiver: Arc::new(Mutex::new(response_receiver)),
+            response_sender,
+        }
+    }
+    
+    /// Get next request ID
+    async fn next_id(&self) -> u64 {
+        let mut id = self.request_id.lock().await;
+        *id += 1;
+        *id
+    }
+    
+    /// Connect to the pool
+    pub async fn connect(&self) -> StratumResult<()> {
+        tracing::info!("Connecting to pool: {}", self.config.url);
+        
+        let stream = TcpStream::connect(&self.config.url).await.map_err(|e| {
+            StratumError::ConnectionError(format!("Failed to connect to {}: {}", self.config.url, e))
+        })?;
+        
+        tracing::info!("Connected to pool successfully");
+        
+        // Split stream into reader and writer
+        let (reader, writer) = tokio::io::split(stream);
+        
+        *self.writer.lock().await = Some(writer);
+        
+        // Start reader task
+        self.start_reader(reader).await;
+        
+        Ok(())
+    }
+    
+    /// Start reader task to handle incoming messages
+    async fn start_reader(&self, reader: ReadHalf<TcpStream>) {
+        let job_sender = self.job_sender.clone();
+        let response_sender = self.response_sender.clone();
+        
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            
+            loop {
+                line.clear();
+                match reader.read_line(&mut line).await {
+                    Ok(0) => {
+                        tracing::error!("Connection closed by server");
+                        break;
+                    }
+                    Ok(_) => {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        
+                        tracing::debug!("Received: {}", line);
+                        
+                        match serde_json::from_str::<StratumResponse>(line) {
+                            Ok(response) => {
+                                // Check if it's a notification or response
+                                if response.id.is_some() {
+                                    // This is a response to our request
+                                    if response_sender.send(response).is_err() {
+                                        tracing::error!("Failed to send response to handler");
+                                    }
+                                } else {
+                                    // This is a notification
+                                    if let Some(method) = response.get_method() {
+                                        if method == StratumMethod::Notify.as_str() {
+                                            if let Some(params) = &response.params {
+                                                match StratumJob::from_params(params) {
+                                                    Ok(job) => {
+                                                        tracing::info!(
+                                                            "New job received: {} (clean={})",
+                                                            job.job_id,
+                                                            job.clean_jobs
+                                                        );
+                                                        
+                                                        if job_sender.send(job).is_err() {
+                                                            tracing::error!("Failed to send job to receiver");
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::error!("Failed to parse job: {}", e);
+                                                    }
+                                                }
+                                            }
+                                        } else if method == StratumMethod::SetDifficulty.as_str() {
+                                            if let Some(params) = &response.params {
+                                                if let Some(diff) = params.get(0).and_then(|v| v.as_f64()) {
+                                                    tracing::info!("Difficulty set to: {}", diff);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to parse response: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to read from stream: {}", e);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+    
+    /// Send a request and wait for response
+    async fn send_request(&self, request: StratumRequest) -> StratumResult<StratumResponse> {
+        let json_line = request.to_json_line()?;
+        
+        tracing::debug!("Sending: {}", json_line.trim());
+        
+        // Write request
+        {
+            let mut writer_lock = self.writer.lock().await;
+            let writer = writer_lock.as_mut().ok_or_else(|| {
+                StratumError::ConnectionError("Not connected".to_string())
+            })?;
+            
+            writer.write_all(json_line.as_bytes()).await?;
+            writer.flush().await?;
+        }
+        
+        // Wait for response from reader task
+        let response = self.response_receiver.lock().await.recv().await
+            .ok_or_else(|| StratumError::ConnectionError("Connection closed".to_string()))?;
+        
+        if response.is_error() {
+            return Err(StratumError::ProtocolError(
+                format!("Server returned error: {:?}", response.error)
+            ));
+        }
+        
+        Ok(response)
+    }
+    
+    /// Subscribe to the pool
+    pub async fn subscribe(&self) -> StratumResult<()> {
+        tracing::info!("Subscribing to pool...");
+        
+        let id = self.next_id().await;
+        let request = StratumRequest::subscribe(id, &self.config.user_agent);
+        
+        let response = self.send_request(request).await?;
+        
+        if response.result.is_none() {
+            return Err(StratumError::SubscriptionFailed);
+        }
+        
+        tracing::info!("Subscription successful");
+        
+        Ok(())
+    }
+    
+    /// Authorize worker
+    pub async fn authorize(&self) -> StratumResult<()> {
+        tracing::info!("Authorizing worker: {}", self.config.username);
+        
+        let id = self.next_id().await;
+        let request = StratumRequest::authorize(
+            id,
+            &self.config.username,
+            &self.config.password,
+        );
+        
+        let response = self.send_request(request).await?;
+        
+        let authorized = response.result
+            .as_ref()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        
+        if !authorized {
+            return Err(StratumError::AuthorizationFailed);
+        }
+        
+        tracing::info!("Authorization successful");
+        
+        Ok(())
+    }
+    
+    /// Submit a share
+    pub async fn submit_share(
+        &self,
+        job_id: &str,
+        extranonce2: &str,
+        ntime: &str,
+        nonce: &str,
+    ) -> StratumResult<bool> {
+        let id = self.next_id().await;
+        let request = StratumRequest::submit(
+            id,
+            &self.config.username,
+            job_id,
+            extranonce2,
+            ntime,
+            nonce,
+        );
+        
+        let response = self.send_request(request).await?;
+        
+        let accepted = response.result
+            .as_ref()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        
+        if accepted {
+            tracing::info!("Share accepted!");
+        } else {
+            tracing::warn!("Share rejected");
+        }
+        
+        Ok(accepted)
+    }
+    
+    /// Start listening for server notifications (mining.notify, etc.)
+    
+    /// Get next job from the queue
+    pub async fn get_job(&self) -> Option<StratumJob> {
+        self.job_receiver.lock().await.recv().await
+    }
+    
+    /// Full connection flow: connect, subscribe, authorize, start listener
+    pub async fn connect_and_login(&self) -> StratumResult<()> {
+        self.connect().await?;
+        self.subscribe().await?;
+        self.authorize().await?;
+        
+        tracing::info!("Successfully connected and authorized to pool");
+        
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stratum_config() {
+        let config = StratumConfig::new(
+            "pool.example.com:3333".to_string(),
+            "wallet.worker".to_string(),
+            "x".to_string(),
+        );
+        
+        assert_eq!(config.url, "pool.example.com:3333");
+        assert_eq!(config.username, "wallet.worker");
+        assert!(config.user_agent.contains("rust-miner"));
+    }
+}

@@ -4,9 +4,11 @@ use colored::*;
 
 mod cli;
 mod gpu;
+mod stratum;
 
 use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus};
+use stratum::{StratumClient, StratumConfig};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -104,22 +106,62 @@ async fn main() -> Result<()> {
     
     println!();
 
-    // TODO: Initialize mining backend
-    tracing::info!("Initializing mining backend...");
+    // Initialize Stratum client
+    tracing::info!("Initializing Stratum connection...");
     
-    // TODO: Connect to pool
-    tracing::info!("Connecting to pool: {}", args.url);
+    let stratum_config = StratumConfig::new(
+        args.url.clone(),
+        args.user.clone(),
+        args.pass.clone(),
+    );
     
-    // TODO: Start mining
-    tracing::info!("Starting mining with algorithm: {}", args.algo);
-
-    // Placeholder: keep running
-    println!("{}", "Mining started! Press Ctrl+C to stop.".yellow().bold());
+    let stratum_client = StratumClient::new(stratum_config);
     
-    // Wait for Ctrl+C
-    tokio::signal::ctrl_c().await?;
+    // Connect to pool
+    match stratum_client.connect_and_login().await {
+        Ok(_) => {
+            println!("{}", "✓ Connected to pool successfully".green().bold());
+        }
+        Err(e) => {
+            eprintln!("\n{}", "❌ Failed to connect to pool!".red().bold());
+            eprintln!("{}", format!("   Error: {}", e).red());
+            eprintln!("\n{}", "Please check:".yellow());
+            eprintln!("{}", "  • Pool URL is correct and reachable".yellow());
+            eprintln!("{}", "  • Wallet address is valid".yellow());
+            eprintln!("{}", "  • Network connection is working".yellow());
+            std::process::exit(1);
+        }
+    }
     
-    println!("\n{}", "Shutting down miner...".yellow());
+    println!("\n{}", "=== Mining Status ===".cyan().bold());
+    println!("{}", "Waiting for jobs from pool...".yellow());
+    
+    // Main mining loop - wait for jobs
+    let mut job_count = 0;
+    loop {
+        tokio::select! {
+            Some(job) = stratum_client.get_job() => {
+                job_count += 1;
+                println!("\n{} {} {}", 
+                    "📋 Job".cyan().bold(),
+                    format!("#{}", job_count).bright_white(),
+                    format!("(ID: {})", job.job_id).dimmed()
+                );
+                println!("   {} {}", "Previous Hash:".green(), job.prevhash);
+                println!("   {} {}", "Network Time:".green(), job.ntime);
+                println!("   {} {}", "Difficulty:".green(), job.nbits);
+                println!("   {} {}", "Clean Jobs:".green(), job.clean_jobs);
+                
+                // TODO: Send job to GPU miners
+                tracing::info!("Job ready for mining");
+            }
+            
+            _ = tokio::signal::ctrl_c() => {
+                println!("\n{}", "Shutting down miner...".yellow());
+                break;
+            }
+        }
+    }
 
     Ok(())
 }
