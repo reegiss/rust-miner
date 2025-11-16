@@ -2,10 +2,12 @@ use anyhow::Result;
 use clap::Parser;
 use colored::*;
 
+mod algorithms;
 mod cli;
 mod gpu;
 mod stratum;
 
+use algorithms::{HashAlgorithm, QHash};
 use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus};
 use stratum::{StratumClient, StratumConfig};
