@@ -3,8 +3,10 @@ use clap::Parser;
 use colored::*;
 
 mod cli;
+mod gpu;
 
 use cli::{Args, display_banner};
+use gpu::{detect_gpus, select_gpus};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,11 +61,51 @@ async fn main() -> Result<()> {
     
     println!();
 
+    // Detect GPUs
+    tracing::info!("Detecting available GPUs...");
+    
+    let all_devices = match detect_gpus() {
+        Ok(devices) => devices,
+        Err(e) => {
+            eprintln!("\n{}", "❌ GPU Detection Failed!".red().bold());
+            eprintln!("{}", format!("   Error: {}", e).red());
+            eprintln!("\n{}", "This application requires a GPU with CUDA or OpenCL support.".yellow());
+            eprintln!("{}", "Please ensure:".yellow());
+            eprintln!("{}", "  • GPU drivers are installed".yellow());
+            eprintln!("{}", "  • CUDA Toolkit installed (for NVIDIA)".yellow());
+            eprintln!("{}", "  • OpenCL runtime installed (for AMD/Intel)".yellow());
+            eprintln!("\n{}", "See SETUP.md for installation instructions.".cyan());
+            std::process::exit(1);
+        }
+    };
+    
+    // Display detected GPUs
+    println!("\n{}", "=== Detected GPUs ===".cyan().bold());
+    for device in &all_devices {
+        println!("  {}", format!("{}", device).green());
+    }
+    
+    // Select GPUs based on --gpu argument
+    let selected_devices = match select_gpus(args.gpu.clone(), &all_devices) {
+        Ok(devices) => devices,
+        Err(e) => {
+            eprintln!("\n{}", format!("Error selecting GPUs: {}", e).red().bold());
+            std::process::exit(1);
+        }
+    };
+    
+    // Display selected GPUs for mining
+    if selected_devices.len() < all_devices.len() {
+        println!("\n{}", "=== Selected GPUs for Mining ===".cyan().bold());
+        for device in &selected_devices {
+            println!("  {}", format!("{}", device).green());
+        }
+    }
+    
+    println!();
+
     // TODO: Initialize mining backend
     tracing::info!("Initializing mining backend...");
-    
-    // TODO: Detect GPU
-    tracing::info!("Detecting GPU...");
     
     // TODO: Connect to pool
     tracing::info!("Connecting to pool: {}", args.url);
