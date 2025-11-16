@@ -235,6 +235,82 @@ pub fn mine_job_cpu(
     Ok(None)
 }
 
+/// Mine a job using GPU (CUDA)
+#[cfg(feature = "cuda")]
+pub fn mine_job_gpu(
+    cuda_miner: &crate::cuda::CudaMiner,
+    job: &StratumJob,
+    extranonce1: &str,
+    extranonce2: &[u8],
+    start_nonce: u32,
+    num_nonces: u32,
+    stats: &mut MiningStats,
+) -> Result<Option<(u32, [u8; 32])>> {
+    // Parse ntime for QHash
+    let ntime = hex_to_u32_le(&job.ntime)?;
+    
+    // Calculate target from nBits (big-endian)
+    let nbits_bytes = hex_to_bytes_be(&job.nbits)?;
+    if nbits_bytes.len() != 4 {
+        return Err(anyhow!("Expected 4 bytes for nbits, got {}", nbits_bytes.len()));
+    }
+    let nbits = u32::from_be_bytes([nbits_bytes[0], nbits_bytes[1], nbits_bytes[2], nbits_bytes[3]]);
+    let target = nbits_to_target(nbits);
+    
+    // Calculate merkle root
+    let merkle_root = calculate_merkle_root(job, extranonce1, extranonce2)?;
+    
+    // Build block header WITHOUT nonce (76 bytes)
+    let mut header_76 = [0u8; 76];
+    
+    // Version (4 bytes, little-endian)
+    let version = hex_to_u32_le(&job.version)?;
+    header_76[0..4].copy_from_slice(&version.to_le_bytes());
+    
+    // Previous block hash (32 bytes, little-endian)
+    let prevhash = hex_to_bytes_le(&job.prevhash)?;
+    if prevhash.len() != 32 {
+        return Err(anyhow!("Invalid prevhash length: {}", prevhash.len()));
+    }
+    header_76[4..36].copy_from_slice(&prevhash);
+    
+    // Merkle root (32 bytes, little-endian)
+    header_76[36..68].copy_from_slice(&merkle_root);
+    
+    // nTime (4 bytes, little-endian)
+    header_76[68..72].copy_from_slice(&ntime.to_le_bytes());
+    
+    // nBits (4 bytes, little-endian)
+    header_76[72..76].copy_from_slice(&nbits.to_le_bytes());
+    
+    // Note: nonce will be added by GPU kernel (last 4 bytes)
+    
+    tracing::debug!(
+        "GPU mining: nBits=0x{:08x}, target={}, nonces={}",
+        nbits,
+        hex::encode(&target[..8]),
+        num_nonces
+    );
+    
+    // Mine on GPU
+    let result = cuda_miner.mine_job(&header_76, ntime, &target, start_nonce, num_nonces)?;
+    
+    // Update stats
+    stats.hashes += num_nonces as u64;
+    
+    if let Some((nonce, hash)) = result {
+        stats.shares_found += 1;
+        tracing::info!(
+            "GPU found share! Nonce: 0x{:08x}, Hash: {}",
+            nonce,
+            hex::encode(hash)
+        );
+        return Ok(Some((nonce, hash)));
+    }
+    
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

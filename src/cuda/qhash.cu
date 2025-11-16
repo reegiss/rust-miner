@@ -11,8 +11,10 @@
  * Performance target: ~1000x faster than CPU
  */
 
-#include <stdint.h>
-#include <math.h>
+// Use CUDA built-in types instead of stdint.h
+typedef unsigned char uint8_t;
+typedef unsigned int uint32_t;
+typedef short int16_t;
 
 // SHA-256 constants
 __constant__ uint32_t K[64] = {
@@ -237,7 +239,7 @@ __device__ int16_t to_fixed_point(double value) {
  * 
  * Each thread processes one nonce
  */
-__global__ void qhash_mine(
+extern "C" __global__ void qhash_mine(
     const uint8_t *block_header,    // 76 bytes (without nonce)
     uint32_t ntime,                  // Network time for protocol upgrade
     uint32_t start_nonce,            // Starting nonce

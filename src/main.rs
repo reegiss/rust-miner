@@ -15,6 +15,40 @@ use gpu::{detect_gpus, select_gpus};
 use mining::{mine_job_cpu, MiningStats};
 use stratum::{StratumClient, StratumConfig};
 
+/// CPU mining fallback (small chunks for responsiveness)
+async fn mine_cpu_fallback(
+    stratum_client: &StratumClient,
+    job: &stratum::protocol::StratumJob,
+    extranonce1: &str,
+    extranonce2: &[u8],
+    stats: &mut MiningStats,
+) -> Option<(u32, [u8; 32])> {
+    let chunk_size = 50_000u32;
+    let mut start_nonce = 0u32;
+    
+    loop {
+        // Check for new job
+        if stratum_client.has_pending_job().await {
+            break;
+        }
+        
+        let end_nonce = start_nonce.saturating_add(chunk_size);
+        
+        match mine_job_cpu(job, extranonce1, extranonce2, start_nonce, end_nonce, stats) {
+            Ok(Some((nonce, hash))) => return Some((nonce, hash)),
+            Ok(None) => {
+                start_nonce = end_nonce;
+                if start_nonce < chunk_size {
+                    break; // Wrapped around
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    
+    None
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
@@ -141,6 +175,34 @@ async fn main() -> Result<()> {
     println!("\n{}", "=== Mining Status ===".cyan().bold());
     println!("{}", "Waiting for jobs from pool...".yellow());
     
+    // Initialize CUDA miner if available
+    #[cfg(feature = "cuda")]
+    let cuda_miner = {
+        tracing::info!("Initializing CUDA miner...");
+        match crate::cuda::CudaMiner::new() {
+            Ok(miner) => {
+                let device_name = miner.device_name().unwrap_or_else(|_| "Unknown".to_string());
+                let (cc_major, cc_minor) = miner.compute_capability().unwrap_or((0, 0));
+                println!("\n{}", "=== GPU Mining Initialized ===".green().bold());
+                println!("   {} {}", "Device:".green(), device_name.bright_white());
+                println!("   {} {}.{}", "Compute Capability:".green(), cc_major, cc_minor);
+                println!("   {} Using CUDA kernel", "Mode:".green());
+                println!();
+                Some(miner)
+            }
+            Err(e) => {
+                eprintln!("\n{}", "⚠️  CUDA initialization failed!".yellow().bold());
+                eprintln!("   {}", format!("Error: {}", e).yellow());
+                eprintln!("   {}", "Falling back to CPU mining...".yellow());
+                println!();
+                None
+            }
+        }
+    };
+    
+    #[cfg(not(feature = "cuda"))]
+    let cuda_miner: Option<()> = None;
+    
     // Mining statistics
     let mut stats = MiningStats::new();
     let mut extranonce2_counter: u32 = 0;
@@ -178,23 +240,71 @@ async fn main() -> Result<()> {
                 println!("   {} {}", "Extranonce2:".green(), hex::encode(&extranonce2));
                 println!("\n{}", "⛏️  Mining...".yellow().bold());
                 
-                // NOTE: Using CPU mining temporarily ONLY for pool connectivity testing
-                // TODO: Replace with GPU (CUDA) mining for production (1000x faster)
-                let chunk_size = 50_000; // Small chunks for responsiveness to Ctrl+C
-                let mut start_nonce = 0u32;
-                
                 let start_time = std::time::Instant::now();
-                'mining: loop {
-                    // Check if there's a new job waiting (non-blocking)
-                    if stratum_client.has_pending_job().await {
-                        println!("   {} Switching to new job", "🔄".yellow());
-                        break 'mining;
+                
+                // Choose mining method based on CUDA availability
+                #[cfg(feature = "cuda")]
+                let mining_result = if let Some(ref miner) = cuda_miner {
+                    // GPU Mining - process large batches
+                    let chunk_size = 10_000_000u32; // 10M nonces per GPU call
+                    let mut current_nonce = 0u32;
+                    let mut found_share = None;
+                    
+                    'gpu_mining: loop {
+                        // Check for new job
+                        if stratum_client.has_pending_job().await {
+                            println!("   {} Switching to new job", "🔄".yellow());
+                            break 'gpu_mining;
+                        }
+                        
+                        // Mine chunk on GPU
+                        match crate::mining::mine_job_gpu(
+                            miner,
+                            &job,
+                            &extranonce1,
+                            &extranonce2,
+                            current_nonce,
+                            chunk_size,
+                            &mut stats
+                        ) {
+                            Ok(Some((nonce, hash))) => {
+                                found_share = Some((nonce, hash));
+                                break 'gpu_mining;
+                            }
+                            Ok(None) => {
+                                // Continue to next chunk
+                                let elapsed = start_time.elapsed();
+                                let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
+                                tracing::debug!(
+                                    "GPU mined {} hashes | {:.2} MH/s",
+                                    stats.hashes,
+                                    hashrate / 1_000_000.0
+                                );
+                                
+                                current_nonce = current_nonce.wrapping_add(chunk_size);
+                                if current_nonce < chunk_size {
+                                    // Wrapped around, exhausted nonce space
+                                    break 'gpu_mining;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("   {} GPU mining error: {}", "❌".red(), e);
+                                break 'gpu_mining;
+                            }
+                        }
                     }
                     
-                    let end_nonce = start_nonce.saturating_add(chunk_size);
-                    
-                    match mine_job_cpu(&job, &extranonce1, &extranonce2, start_nonce, end_nonce, &mut stats) {
-                        Ok(Some((nonce, hash))) => {
+                    found_share
+                } else {
+                    // Fallback to CPU if CUDA init failed
+                    mine_cpu_fallback(&stratum_client, &job, &extranonce1, &extranonce2, &mut stats).await
+                };
+                
+                #[cfg(not(feature = "cuda"))]
+                let mining_result = mine_cpu_fallback(&stratum_client, &job, &extranonce1, &extranonce2, &mut stats).await;
+                
+                // Process mining result
+                if let Some((nonce, hash)) = mining_result {
                             let elapsed = start_time.elapsed();
                             println!("\n{}", "🎉 SHARE FOUND!".green().bold());
                             println!("   {} 0x{:08x}", "Nonce:".green(), nonce);
@@ -228,53 +338,27 @@ async fn main() -> Result<()> {
                                     eprintln!("   {} Submit error: {}", "❌".red(), e);
                                 }
                             }
-                            
-                            // Continue mining this job after submitting
-                            start_nonce = end_nonce;
-                            if start_nonce == 0 {
-                                // Nonce space exhausted, move to next extranonce2
-                                break 'mining;
-                            }
-                        }
-                        Ok(None) => {
-                            // No share found in this chunk, continue to next chunk
-                            start_nonce = end_nonce;
-                            if start_nonce == 0 {
-                                // Nonce space exhausted (wrapped around)
-                                let elapsed = start_time.elapsed();
-                                let hashrate = if elapsed.as_secs() > 0 {
-                                    stats.hashes as f64 / elapsed.as_secs_f64()
-                                } else {
-                                    0.0
-                                };
-                                println!("   {} Exhausted nonce space (4.3 billion hashes)", "ℹ️".dimmed());
-                                println!("   {} {:.2} H/s", "Hashrate:".dimmed(), hashrate);
-                                break 'mining;
-                            }
-                            
-                            // Log progress every chunk
-                            if start_nonce % (chunk_size * 10) == 0 {
-                                let elapsed = start_time.elapsed();
-                                let hashrate = if elapsed.as_secs() > 0 {
-                                    stats.hashes as f64 / elapsed.as_secs_f64()
-                                } else {
-                                    0.0
-                                };
-                                println!("   {} Mined {} hashes | {:.2} H/s", 
-                                    "⛏️".dimmed(),
-                                    start_nonce.to_string().bright_white(),
-                                    hashrate
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("\n{} {}", "❌ Mining error:".red().bold(), e);
-                            break 'mining;
-                        }
+                } else {
+                    // No share found
+                    let elapsed = start_time.elapsed();
+                    let hashrate = if elapsed.as_secs() > 0 {
+                        stats.hashes as f64 / elapsed.as_secs_f64()
+                    } else {
+                        0.0
+                    };
+                    
+                    #[cfg(feature = "cuda")]
+                    if cuda_miner.is_some() {
+                        tracing::debug!("No share found | {:.2} MH/s", hashrate / 1_000_000.0);
+                    } else {
+                        tracing::debug!("No share found | {:.2} kH/s", hashrate / 1_000.0);
                     }
+                    
+                    #[cfg(not(feature = "cuda"))]
+                    tracing::debug!("No share found | {:.2} kH/s", hashrate / 1_000.0);
                 }
                 
-                // Display statistics
+                // Display statistics every 5 jobs
                 if job_count % 5 == 0 {
                     println!("\n{}", "=== Statistics ===".cyan());
                     println!("   {} {}", "Total Hashes:".green(), stats.hashes);
