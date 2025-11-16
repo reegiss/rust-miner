@@ -4,6 +4,8 @@ use colored::*;
 
 mod algorithms;
 mod cli;
+#[cfg(feature = "cuda")]
+mod cuda;
 mod gpu;
 mod mining;
 mod stratum;
