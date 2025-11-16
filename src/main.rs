@@ -176,58 +176,99 @@ async fn main() -> Result<()> {
                 println!("   {} {}", "Extranonce2:".green(), hex::encode(&extranonce2));
                 println!("\n{}", "⛏️  Mining...".yellow().bold());
                 
-                // Mine the job (CPU version for now)
-                let start_nonce = 0;
-                let end_nonce = 1_000_000; // Mine first 1M nonces
+                // NOTE: Using CPU mining temporarily ONLY for pool connectivity testing
+                // TODO: Replace with GPU (CUDA) mining for production (1000x faster)
+                let chunk_size = 50_000; // Small chunks for responsiveness to Ctrl+C
+                let mut start_nonce = 0u32;
                 
                 let start_time = std::time::Instant::now();
-                match mine_job_cpu(&job, &extranonce1, &extranonce2, start_nonce, end_nonce, &mut stats) {
-                    Ok(Some((nonce, hash))) => {
-                        let elapsed = start_time.elapsed();
-                        println!("\n{}", "🎉 SHARE FOUND!".green().bold());
-                        println!("   {} 0x{:08x}", "Nonce:".green(), nonce);
-                        println!("   {} {}", "Hash:".green(), hex::encode(hash));
-                        println!("   {} {:.2}s", "Time:".green(), elapsed.as_secs_f64());
-                        
-                        // Submit share to pool
-                        println!("   {} Submitting share...", "📤".yellow());
-                        
-                        let extranonce2_hex = hex::encode(&extranonce2);
-                        let nonce_hex = format!("{:08x}", nonce);
-                        
-                        match stratum_client.submit_share(
-                            &job.job_id,
-                            &extranonce2_hex,
-                            &job.ntime,
-                            &nonce_hex
-                        ).await {
-                            Ok(true) => {
-                                stats.shares_accepted += 1;
-                                println!("   {} {}", "✅ Share accepted!".green().bold(), 
-                                    format!("({}/{})", stats.shares_accepted, stats.shares_found).dimmed());
+                'mining: loop {
+                    // Check if there's a new job waiting (non-blocking)
+                    if stratum_client.has_pending_job().await {
+                        println!("   {} Switching to new job", "🔄".yellow());
+                        break 'mining;
+                    }
+                    
+                    let end_nonce = start_nonce.saturating_add(chunk_size);
+                    
+                    match mine_job_cpu(&job, &extranonce1, &extranonce2, start_nonce, end_nonce, &mut stats) {
+                        Ok(Some((nonce, hash))) => {
+                            let elapsed = start_time.elapsed();
+                            println!("\n{}", "🎉 SHARE FOUND!".green().bold());
+                            println!("   {} 0x{:08x}", "Nonce:".green(), nonce);
+                            println!("   {} {}", "Hash:".green(), hex::encode(hash));
+                            println!("   {} {:.2}s", "Time:".green(), elapsed.as_secs_f64());
+                            
+                            // Submit share to pool
+                            println!("   {} Submitting share...", "📤".yellow());
+                            
+                            let extranonce2_hex = hex::encode(&extranonce2);
+                            let nonce_hex = format!("{:08x}", nonce);
+                            
+                            match stratum_client.submit_share(
+                                &job.job_id,
+                                &extranonce2_hex,
+                                &job.ntime,
+                                &nonce_hex
+                            ).await {
+                                Ok(true) => {
+                                    stats.shares_accepted += 1;
+                                    println!("   {} {}", "✅ Share accepted!".green().bold(), 
+                                        format!("({}/{})", stats.shares_accepted, stats.shares_found).dimmed());
+                                }
+                                Ok(false) => {
+                                    stats.shares_rejected += 1;
+                                    println!("   {} {}", "❌ Share rejected".red().bold(),
+                                        format!("({} rejected)", stats.shares_rejected).dimmed());
+                                }
+                                Err(e) => {
+                                    stats.shares_rejected += 1;
+                                    eprintln!("   {} Submit error: {}", "❌".red(), e);
+                                }
                             }
-                            Ok(false) => {
-                                stats.shares_rejected += 1;
-                                println!("   {} {}", "❌ Share rejected".red().bold(),
-                                    format!("({} rejected)", stats.shares_rejected).dimmed());
-                            }
-                            Err(e) => {
-                                stats.shares_rejected += 1;
-                                eprintln!("   {} Submit error: {}", "❌".red(), e);
+                            
+                            // Continue mining this job after submitting
+                            start_nonce = end_nonce;
+                            if start_nonce == 0 {
+                                // Nonce space exhausted, move to next extranonce2
+                                break 'mining;
                             }
                         }
-                    }
-                    Ok(None) => {
-                        let elapsed = start_time.elapsed();
-                        let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
-                        println!("   {} No share found in {} hashes", 
-                            "ℹ️".dimmed(),
-                            (end_nonce - start_nonce).to_string().bright_white()
-                        );
-                        println!("   {} {:.2} H/s", "Hashrate:".dimmed(), hashrate);
-                    }
-                    Err(e) => {
-                        eprintln!("\n{} {}", "❌ Mining error:".red().bold(), e);
+                        Ok(None) => {
+                            // No share found in this chunk, continue to next chunk
+                            start_nonce = end_nonce;
+                            if start_nonce == 0 {
+                                // Nonce space exhausted (wrapped around)
+                                let elapsed = start_time.elapsed();
+                                let hashrate = if elapsed.as_secs() > 0 {
+                                    stats.hashes as f64 / elapsed.as_secs_f64()
+                                } else {
+                                    0.0
+                                };
+                                println!("   {} Exhausted nonce space (4.3 billion hashes)", "ℹ️".dimmed());
+                                println!("   {} {:.2} H/s", "Hashrate:".dimmed(), hashrate);
+                                break 'mining;
+                            }
+                            
+                            // Log progress every chunk
+                            if start_nonce % (chunk_size * 10) == 0 {
+                                let elapsed = start_time.elapsed();
+                                let hashrate = if elapsed.as_secs() > 0 {
+                                    stats.hashes as f64 / elapsed.as_secs_f64()
+                                } else {
+                                    0.0
+                                };
+                                println!("   {} Mined {} hashes | {:.2} H/s", 
+                                    "⛏️".dimmed(),
+                                    start_nonce.to_string().bright_white(),
+                                    hashrate
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("\n{} {}", "❌ Mining error:".red().bold(), e);
+                            break 'mining;
+                        }
                     }
                 }
                 

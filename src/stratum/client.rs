@@ -338,6 +338,12 @@ impl StratumClient {
         
         extranonce2
     }
+    
+    /// Check if there's a pending job (non-blocking)
+    pub async fn has_pending_job(&self) -> bool {
+        let receiver = self.job_receiver.lock().await;
+        !receiver.is_empty()
+    }
 }
 
 #[cfg(test)]

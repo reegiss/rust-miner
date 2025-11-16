@@ -152,17 +152,24 @@ pub fn nbits_to_target(nbits: u32) -> [u8; 32] {
     let mantissa = nbits & 0x00FFFFFF;
     
     if exponent <= 3 {
+        // Small exponent: shift right
         let shifted = mantissa >> (8 * (3 - exponent));
         target[29] = (shifted >> 16) as u8;
         target[30] = (shifted >> 8) as u8;
         target[31] = shifted as u8;
-    } else {
+    } else if exponent <= 32 {
+        // Normal range: place mantissa at correct position
         let offset = 32 - exponent;
-        if offset < 29 {
-            target[offset] = (mantissa >> 16) as u8;
+        target[offset] = (mantissa >> 16) as u8;
+        if offset + 1 < 32 {
             target[offset + 1] = (mantissa >> 8) as u8;
+        }
+        if offset + 2 < 32 {
             target[offset + 2] = mantissa as u8;
         }
+    } else {
+        // Exponent > 32: target is larger than 256 bits, return max
+        target.fill(0xFF);
     }
     
     target
@@ -181,9 +188,19 @@ pub fn mine_job_cpu(
     let ntime = hex_to_u32_le(&job.ntime)?;
     let qhash = QHash::new(ntime);
     
-    // Calculate target from nBits
-    let nbits = hex_to_u32_le(&job.nbits)?;
+    // Calculate target from nBits (nBits is big-endian in Stratum)
+    let nbits_bytes = hex_to_bytes_be(&job.nbits)?;
+    if nbits_bytes.len() != 4 {
+        return Err(anyhow!("Expected 4 bytes for nbits, got {}", nbits_bytes.len()));
+    }
+    let nbits = u32::from_be_bytes([nbits_bytes[0], nbits_bytes[1], nbits_bytes[2], nbits_bytes[3]]);
     let target = nbits_to_target(nbits);
+    
+    tracing::debug!(
+        "Mining parameters - nBits: 0x{:08x}, Target: {}",
+        nbits,
+        hex::encode(target)
+    );
     
     // Mine nonce range
     for nonce in start_nonce..end_nonce {
