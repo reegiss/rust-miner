@@ -45,6 +45,8 @@ pub struct StratumClient {
     job_sender: mpsc::UnboundedSender<StratumJob>,
     response_receiver: Arc<Mutex<mpsc::UnboundedReceiver<StratumResponse>>>,
     response_sender: mpsc::UnboundedSender<StratumResponse>,
+    extranonce1: Arc<Mutex<Option<String>>>,
+    extranonce2_size: Arc<Mutex<Option<usize>>>,
 }
 
 impl StratumClient {
@@ -60,6 +62,8 @@ impl StratumClient {
             job_sender,
             response_receiver: Arc::new(Mutex::new(response_receiver)),
             response_sender,
+            extranonce1: Arc::new(Mutex::new(None)),
+            extranonce2_size: Arc::new(Mutex::new(None)),
         }
     }
     
@@ -208,13 +212,27 @@ impl StratumClient {
         
         let response = self.send_request(request).await?;
         
-        if response.result.is_none() {
-            return Err(StratumError::SubscriptionFailed);
+        if let Some(result) = response.result {
+            // Parse extranonce1 and extranonce2_size from result
+            // Result format: [[["mining.notify", "subscription_id"], "extranonce1", extranonce2_size]]
+            if let Some(arr) = result.as_array() {
+                if arr.len() >= 2 {
+                    if let Some(en1) = arr.get(1).and_then(|v| v.as_str()) {
+                        *self.extranonce1.lock().await = Some(en1.to_string());
+                        tracing::info!("Extranonce1: {}", en1);
+                    }
+                    if let Some(en2_size) = arr.get(2).and_then(|v| v.as_u64()) {
+                        *self.extranonce2_size.lock().await = Some(en2_size as usize);
+                        tracing::info!("Extranonce2 size: {}", en2_size);
+                    }
+                }
+            }
+            
+            tracing::info!("Subscription successful");
+            Ok(())
+        } else {
+            Err(StratumError::SubscriptionFailed)
         }
-        
-        tracing::info!("Subscription successful");
-        
-        Ok(())
     }
     
     /// Authorize worker
@@ -294,6 +312,31 @@ impl StratumClient {
         tracing::info!("Successfully connected and authorized to pool");
         
         Ok(())
+    }
+    
+    /// Get extranonce1
+    pub async fn get_extranonce1(&self) -> Option<String> {
+        self.extranonce1.lock().await.clone()
+    }
+    
+    /// Get extranonce2 size
+    pub async fn get_extranonce2_size(&self) -> Option<usize> {
+        *self.extranonce2_size.lock().await
+    }
+    
+    /// Create extranonce2 with given value
+    pub async fn create_extranonce2(&self, value: u32) -> Vec<u8> {
+        let size = self.get_extranonce2_size().await.unwrap_or(4);
+        let mut extranonce2 = vec![0u8; size];
+        
+        // Fill with value (little-endian)
+        for (i, byte) in value.to_le_bytes().iter().enumerate() {
+            if i < size {
+                extranonce2[i] = *byte;
+            }
+        }
+        
+        extranonce2
     }
 }
 

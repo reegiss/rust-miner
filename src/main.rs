@@ -5,11 +5,12 @@ use colored::*;
 mod algorithms;
 mod cli;
 mod gpu;
+mod mining;
 mod stratum;
 
-use algorithms::{HashAlgorithm, QHash};
 use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus};
+use mining::{mine_job_cpu, MiningStats};
 use stratum::{StratumClient, StratumConfig};
 
 #[tokio::main]
@@ -138,6 +139,10 @@ async fn main() -> Result<()> {
     println!("\n{}", "=== Mining Status ===".cyan().bold());
     println!("{}", "Waiting for jobs from pool...".yellow());
     
+    // Mining statistics
+    let mut stats = MiningStats::new();
+    let mut extranonce2_counter: u32 = 0;
+    
     // Main mining loop - wait for jobs
     let mut job_count = 0;
     loop {
@@ -154,12 +159,73 @@ async fn main() -> Result<()> {
                 println!("   {} {}", "Difficulty:".green(), job.nbits);
                 println!("   {} {}", "Clean Jobs:".green(), job.clean_jobs);
                 
-                // TODO: Send job to GPU miners
-                tracing::info!("Job ready for mining");
+                // Get extranonce1 from client
+                let extranonce1 = match stratum_client.get_extranonce1().await {
+                    Some(en1) => en1,
+                    None => {
+                        eprintln!("{}", "Error: No extranonce1 available".red());
+                        continue;
+                    }
+                };
+                
+                // Create extranonce2
+                let extranonce2 = stratum_client.create_extranonce2(extranonce2_counter).await;
+                extranonce2_counter = extranonce2_counter.wrapping_add(1);
+                
+                println!("   {} {}", "Extranonce1:".green(), extranonce1);
+                println!("   {} {}", "Extranonce2:".green(), hex::encode(&extranonce2));
+                println!("\n{}", "⛏️  Mining...".yellow().bold());
+                
+                // Mine the job (CPU version for now)
+                let start_nonce = 0;
+                let end_nonce = 1_000_000; // Mine first 1M nonces
+                
+                let start_time = std::time::Instant::now();
+                match mine_job_cpu(&job, &extranonce1, &extranonce2, start_nonce, end_nonce, &mut stats) {
+                    Ok(Some((nonce, hash))) => {
+                        let elapsed = start_time.elapsed();
+                        println!("\n{}", "🎉 SHARE FOUND!".green().bold());
+                        println!("   {} 0x{:08x}", "Nonce:".green(), nonce);
+                        println!("   {} {}", "Hash:".green(), hex::encode(hash));
+                        println!("   {} {:.2}s", "Time:".green(), elapsed.as_secs_f64());
+                        
+                        // TODO: Submit share to pool
+                        // stratum_client.submit_share(...)
+                        
+                        stats.shares_found += 1;
+                    }
+                    Ok(None) => {
+                        let elapsed = start_time.elapsed();
+                        let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
+                        println!("   {} No share found in {} hashes", 
+                            "ℹ️".dimmed(),
+                            (end_nonce - start_nonce).to_string().bright_white()
+                        );
+                        println!("   {} {:.2} H/s", "Hashrate:".dimmed(), hashrate);
+                    }
+                    Err(e) => {
+                        eprintln!("\n{} {}", "❌ Mining error:".red().bold(), e);
+                    }
+                }
+                
+                // Display statistics
+                if job_count % 5 == 0 {
+                    println!("\n{}", "=== Statistics ===".cyan());
+                    println!("   {} {}", "Total Hashes:".green(), stats.hashes);
+                    println!("   {} {}", "Shares Found:".green(), stats.shares_found);
+                }
             }
             
             _ = tokio::signal::ctrl_c() => {
                 println!("\n{}", "Shutting down miner...".yellow());
+                
+                // Final statistics
+                println!("\n{}", "=== Final Statistics ===".cyan().bold());
+                println!("   {} {}", "Total Hashes:".green(), stats.hashes);
+                println!("   {} {}", "Shares Found:".green(), stats.shares_found);
+                println!("   {} {}", "Shares Accepted:".green(), stats.shares_accepted);
+                println!("   {} {}", "Shares Rejected:".green(), stats.shares_rejected);
+                
                 break;
             }
         }
