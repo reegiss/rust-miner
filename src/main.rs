@@ -189,10 +189,33 @@ async fn main() -> Result<()> {
                         println!("   {} {}", "Hash:".green(), hex::encode(hash));
                         println!("   {} {:.2}s", "Time:".green(), elapsed.as_secs_f64());
                         
-                        // TODO: Submit share to pool
-                        // stratum_client.submit_share(...)
+                        // Submit share to pool
+                        println!("   {} Submitting share...", "📤".yellow());
                         
-                        stats.shares_found += 1;
+                        let extranonce2_hex = hex::encode(&extranonce2);
+                        let nonce_hex = format!("{:08x}", nonce);
+                        
+                        match stratum_client.submit_share(
+                            &job.job_id,
+                            &extranonce2_hex,
+                            &job.ntime,
+                            &nonce_hex
+                        ).await {
+                            Ok(true) => {
+                                stats.shares_accepted += 1;
+                                println!("   {} {}", "✅ Share accepted!".green().bold(), 
+                                    format!("({}/{})", stats.shares_accepted, stats.shares_found).dimmed());
+                            }
+                            Ok(false) => {
+                                stats.shares_rejected += 1;
+                                println!("   {} {}", "❌ Share rejected".red().bold(),
+                                    format!("({} rejected)", stats.shares_rejected).dimmed());
+                            }
+                            Err(e) => {
+                                stats.shares_rejected += 1;
+                                eprintln!("   {} Submit error: {}", "❌".red(), e);
+                            }
+                        }
                     }
                     Ok(None) => {
                         let elapsed = start_time.elapsed();
