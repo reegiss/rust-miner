@@ -1,11 +1,11 @@
-# Copilot Instructions for rust-miner
+# Copilot Instructions for rust-miner (CUDA-only)
 
 ## Project Overview
-This is a high-performance Rust-based cryptocurrency mining application with GPU acceleration. The project prioritizes CUDA for NVIDIA GPUs, with OpenCL as fallback and CPU mining as last resort.
+This is a high-performance Rust-based cryptocurrency mining application with GPU acceleration. The project is CUDA-only and targets NVIDIA GPUs.
 
 **Cross-Platform Support**: Linux and Windows are both first-class targets. All code must be platform-agnostic or use conditional compilation when platform-specific features are required.
 
-**GPU Required**: This application requires a GPU for mining. There is no CPU mining fallback. Systems without a compatible GPU (CUDA or OpenCL) cannot mine.
+**GPU Required**: This application requires an NVIDIA GPU with CUDA support for mining. There is no CPU or OpenCL fallback. Systems without a compatible CUDA GPU cannot mine.
 
 ## Development Setup
 
@@ -21,14 +21,8 @@ cargo run
 cargo build --release && ./target/release/rust-miner  # Linux/macOS
 cargo build --release && .\target\release\rust-miner.exe  # Windows
 
-# Build with CUDA support (PREFERRED - NVIDIA GPUs)
+# Build with CUDA support (NVIDIA GPUs)
 cargo build --release --features cuda
-
-# Build with OpenCL support (fallback for AMD/Intel GPUs)
-cargo build --release --features opencl
-
-# Build with all backends (auto-detect best available)
-cargo build --release --features all-backends
 
 # Run tests
 cargo test
@@ -48,11 +42,8 @@ cargo fmt
 # Run linter
 cargo clippy -- -D warnings
 
-# Benchmark CUDA vs CPU performance
+# Benchmark CUDA performance
 cargo bench --bench mining_bench --features cuda
-
-# Benchmark all backends
-cargo bench --features all-backends
 ```
 
 ### Platform-Specific Considerations
@@ -60,16 +51,14 @@ cargo bench --features all-backends
 #### Linux
 - Preferred development platform
 - Native CUDA support via CUDA Toolkit
-- OpenCL via Mesa/ICD loaders
 - Use `perf` for profiling
 - Shared library extension: `.so`
 
 #### Windows
 - CUDA via CUDA Toolkit for Windows
-- OpenCL via vendor-specific drivers
 - Use Windows Performance Analyzer for profiling
 - Shared library extension: `.dll`
-- Consider using WSL2 for Linux-like development experience
+- Consider using WSL2 for Linux-like development experience (CUDA on WSL supported with NVIDIA drivers)
 
 #### Cross-Platform Best Practices
 - **Path Handling**: Always use `std::path::Path` and `PathBuf`, never hardcode separators
@@ -174,16 +163,13 @@ candidates.par_iter()
 - **Avoid Dynamic Dispatch**: Prefer generics over trait objects in hot paths
 
 #### GPU Acceleration Patterns
-- **Primary: CUDA (NVIDIA)**: Preferred backend for maximum performance
+- **CUDA (NVIDIA)**: Single supported backend for maximum performance
   - `cudarc` crate for CUDA support (modern, safe Rust bindings)
   - Direct access to NVIDIA GPU features and optimizations
   - Best performance on NVIDIA hardware (GTX/RTX series)
-- **Secondary: OpenCL**: Fallback for AMD/Intel GPUs
-  - `ocl` crate for OpenCL in Rust
-  - Used when CUDA is not available or for AMD/Intel GPUs
-- **No CPU Fallback**: GPU is mandatory for mining
-  - Application will exit gracefully if no GPU is detected
-  - Display helpful error message directing user to GPU requirements
+- **No CPU/OpenCL Fallback**: CUDA GPU is mandatory
+  - Application will exit gracefully if no compatible GPU is detected
+  - Display helpful error message directing user to CUDA requirements
 - **Hybrid CPU/GPU Strategy**: Balance GPU workload with CPU coordination
 ```rust
 // Example: GPU handles all mining, CPU coordinates
@@ -249,33 +235,6 @@ extern "C" __global__ void mine_block(
 }
 "#;
 
-// OpenCL kernel (fallback for non-NVIDIA GPUs)
-const OPENCL_KERNEL: &str = r#"
-__kernel void mine_block(
-    __global const uchar* block_header,
-    uint nonce_start,
-    __global uint* solution,
-    uint difficulty_target
-) {
-    uint gid = get_global_id(0);
-    uint nonce = nonce_start + gid;
-    
-    __local uchar local_header[80];
-    if (get_local_id(0) == 0) {
-        for (int i = 0; i < 80; i++) {
-            local_header[i] = block_header[i];
-        }
-    }
-    barrier(CLK_LOCAL_MEM_FENCE);
-    
-    uchar hash[32];
-    sha256d(local_header, nonce, hash);
-    
-    if (meets_difficulty(hash, difficulty_target)) {
-        atomic_cmpxchg(solution, 0, nonce);
-    }
-}
-"#;
 ```
 
 - **Multi-GPU Support**: Scale across multiple GPUs
@@ -306,37 +265,7 @@ impl MultiGpuMiner {
 }
 ```
 
-- **Backend Priority Strategy**: CUDA → OpenCL → Exit with error
-```rust
-pub enum MiningBackend {
-    Cuda(CudaMiner),
-    OpenCL(OpenClMiner),
-}
-
-impl MiningBackend {
-    pub fn auto_detect() -> Result<Self, String> {
-        // Priority 1: Try CUDA (best performance on NVIDIA)
-        if let Ok(cuda) = CudaMiner::try_new() {
-            log::info!("Using CUDA backend (NVIDIA GPU)");
-            return Ok(Self::Cuda(cuda));
-        }
-        
-        // Priority 2: Try OpenCL (AMD/Intel GPUs or NVIDIA fallback)
-        if let Ok(opencl) = OpenClMiner::try_new() {
-            log::info!("Using OpenCL backend");
-            return Ok(Self::OpenCL(opencl));
-        }
-        
-        // No GPU found - cannot mine
-        Err("No compatible GPU detected. This application requires a GPU with CUDA or OpenCL support. \
-             Please ensure:\n\
-             - GPU drivers are installed\n\
-             - CUDA Toolkit installed (for NVIDIA)\n\
-             - OpenCL runtime installed (for AMD/Intel)\n\
-             See SETUP.md for installation instructions.".to_string())
-    }
-}
-```
+- **Backend Strategy**: CUDA-only. If CUDA initialization fails, exit with a clear error message and setup hints.
 
 - **Performance Monitoring**: Track GPU metrics
   - Monitor GPU temperature and throttling
@@ -384,8 +313,7 @@ When developing this project, consider these typical mining application componen
 
 - **Mining Engine** (`src/mining/`): GPU-only hashing/proof-of-work logic
   - `engine.rs`: Main mining loop and work distribution
-  - `cuda.rs`: CUDA backend implementation (primary)
-  - `opencl.rs`: OpenCL backend implementation (fallback)
+  - `cuda.rs`: CUDA backend implementation (only)
   - `backend.rs`: Backend trait and auto-detection
 - **Blockchain Interface** (`src/blockchain/`): Connection to blockchain network
   - `client.rs`: Network communication with blockchain nodes
@@ -470,11 +398,9 @@ parking_lot = "0.12"      # Faster locks
 ahash = "0.8"             # Faster hashing
 smallvec = "1.11"         # Stack-allocated vecs
 
-# GPU Acceleration (optional, enable via features)
-cudarc = { version = "0.11", optional = true }        # CUDA support (PRIMARY - NVIDIA)
+# GPU Acceleration (enabled via features)
+cudarc = { version = "0.11", optional = true }        # CUDA support (NVIDIA)
 cuda-sys = { version = "0.3", optional = true }       # Low-level CUDA bindings
-ocl = { version = "0.19", optional = true }           # OpenCL support (FALLBACK)
-wgpu = { version = "0.19", optional = true }          # WebGPU (EXPERIMENTAL)
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -497,10 +423,7 @@ which = "6.0"             # Find executables in PATH (cross-platform)
 
 [features]
 default = ["cuda"]                                     # Default to CUDA (NVIDIA GPUs)
-cuda = ["dep:cudarc", "dep:cuda-sys"]                 # PRIMARY backend
-opencl = ["dep:ocl"]                                   # FALLBACK backend
-gpu = ["cuda"]                                         # Alias to CUDA (preferred)
-all-backends = ["cuda", "opencl"]                      # All GPU backends (no CPU)
+cuda = ["dep:cudarc", "dep:cuda-sys"]                 # CUDA backend (only)
 
 
 [target.'cfg(windows)'.dependencies]

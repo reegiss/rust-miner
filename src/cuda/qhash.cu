@@ -34,6 +34,19 @@ __constant__ uint32_t H0[8] = {
     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
 };
 
+// Cosine lookup table for angles k * (PI/32), k = 0..31
+// Used to replace expensive trig calls in the quantum simulation
+__constant__ float COS_PI_OVER_32[32] = {
+    1.000000000f,  0.995184727f,  0.980785280f,  0.956940353f,
+    0.923879504f,  0.881921291f,  0.831469595f,  0.773010433f,
+    0.707106769f,  0.634393275f,  0.555570245f,  0.471396744f,
+    0.382683426f,  0.290284663f,  0.195090324f,  0.098017141f,
+    0.000000000f, -0.098017141f, -0.195090324f, -0.290284663f,
+   -0.382683426f, -0.471396744f, -0.555570245f, -0.634393275f,
+   -0.707106769f, -0.773010433f, -0.831469595f, -0.881921291f,
+   -0.923879504f, -0.956940353f, -0.980785280f, -0.995184727f
+};
+
 // Helper macros for SHA-256
 #define ROTR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 #define CH(x, y, z) (((x) & (y)) ^ (~(x) & (z)))
@@ -210,60 +223,63 @@ __device__ void split_nibbles(const uint8_t *data, uint8_t *nibbles, int len) {
 /*
  * Quantum circuit simulation (simplified for GPU)
  */
-__device__ void quantum_simulation(const uint8_t *nibbles, int nibbles_len, uint32_t ntime, double *expectations) {
+__device__ void quantum_simulation(const uint8_t *nibbles, int nibbles_len, uint32_t ntime, float *expectations) {
     const int N_QUBITS = 16;
     const int N_LAYERS = 2;
-    const double PI = 3.14159265358979323846;
     
     // Initialize expectations
+    #pragma unroll
     for (int i = 0; i < N_QUBITS; i++) {
-        expectations[i] = 0.0;
+        expectations[i] = 0.0f;
     }
     
     // Protocol upgrade flag
     int upgrade = (ntime >= 1758762000) ? 1 : 0;
     
     // Apply layers
+    #pragma unroll
     for (int l = 0; l < N_LAYERS; l++) {
         // Rotation gates
+        #pragma unroll
         for (int i = 0; i < N_QUBITS; i++) {
             uint8_t ry_nibble = nibbles[(2 * l * N_QUBITS + i) % nibbles_len];
             uint8_t rz_nibble = nibbles[((2 * l + 1) * N_QUBITS + i) % nibbles_len];
-            
-            double ry_angle = -(2 * (int)ry_nibble + upgrade) * PI / 32.0;
-            double rz_angle = -(2 * (int)rz_nibble + upgrade) * PI / 32.0;
-            
-            double cos_ry = cos(ry_angle / 2.0);
-            double sin_ry = sin(ry_angle / 2.0);
-            
-            double z_exp = (cos_ry * cos_ry - sin_ry * sin_ry) * cos(rz_angle);
+
+            // Using identity: (cos^2(a) - sin^2(a)) = cos(2a)
+            // Our previous z_exp = (cos(ry/2)^2 - sin(ry/2)^2) * cos(rz) = cos(ry) * cos(rz)
+            // Angles are of the form: angle = (2*nibble + upgrade) * (PI/32)
+            int idx_ry = ((ry_nibble << 1) + upgrade) & 31;
+            int idx_rz = ((rz_nibble << 1) + upgrade) & 31;
+            float z_exp = COS_PI_OVER_32[idx_ry] * COS_PI_OVER_32[idx_rz];
             expectations[i] += z_exp;
         }
         
         // CNOT entanglement (approximate)
+        #pragma unroll
         for (int i = 0; i < N_QUBITS - 1; i++) {
-            double coupling = 0.1;
-            double temp = expectations[i] * (1.0 - coupling) + expectations[i + 1] * coupling;
-            expectations[i + 1] = expectations[i + 1] * (1.0 - coupling) + expectations[i] * coupling;
+            float coupling = 0.1f;
+            float temp = expectations[i] * (1.0f - coupling) + expectations[i + 1] * coupling;
+            expectations[i + 1] = expectations[i + 1] * (1.0f - coupling) + expectations[i] * coupling;
             expectations[i] = temp;
         }
     }
     
     // Normalize with tanh
+    #pragma unroll
     for (int i = 0; i < N_QUBITS; i++) {
-        expectations[i] = tanh(expectations[i]);
+        expectations[i] = tanhf(expectations[i]);
     }
 }
 
 /*
- * Convert double to fixed-point int16
+ * Convert float to fixed-point int16
  */
-__device__ int16_t to_fixed_point(double value) {
+__device__ int16_t to_fixed_point(float value) {
     // Clamp to [-1.0, 1.0]
-    if (value < -1.0) value = -1.0;
-    if (value > 1.0) value = 1.0;
+    if (value < -1.0f) value = -1.0f;
+    if (value > 1.0f) value = 1.0f;
     
-    return (int16_t)(value * 32768.0);
+    return (int16_t)(value * 32768.0f);
 }
 
 /*
@@ -306,7 +322,7 @@ extern "C" __global__ void qhash_mine(
     split_nibbles(hash1, nibbles, 32);
     
     // Step 3: Quantum simulation
-    double expectations[16];
+    float expectations[16];
     quantum_simulation(nibbles, 64, ntime, expectations);
     
     // Step 4: Convert to fixed-point

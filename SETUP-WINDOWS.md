@@ -1,4 +1,4 @@
-# Windows Setup Guide - rust-miner
+# Windows Setup Guide - rust-miner (CUDA-only)
 
 This guide covers Windows-specific setup for the rust-miner project.
 
@@ -6,6 +6,7 @@ This guide covers Windows-specific setup for the rust-miner project.
 
 ### Required Software
 - Windows 10/11 (64-bit)
+- NVIDIA GPU with CUDA support (Pascal or newer recommended)
 - Administrator access for driver installation
 
 ## Step 1: Install Rust
@@ -77,35 +78,9 @@ $env:PATH = "$env:CUDA_PATH\bin;$env:PATH"
 [Environment]::SetEnvironmentVariable("PATH", "$env:CUDA_PATH\bin;$env:PATH", "Machine")
 ```
 
-## Step 4: Install OpenCL (Optional Fallback)
+## Step 4: (Skip) OpenCL
 
-### NVIDIA GPUs
-OpenCL support is included with NVIDIA drivers.
-
-### AMD GPUs
-```powershell
-# Download AMD Software: Adrenalin Edition
-# https://www.amd.com/en/support
-
-# Includes OpenCL runtime
-```
-
-### Intel GPUs
-```powershell
-# Download Intel Graphics Driver
-# https://www.intel.com/content/www/us/en/download/785597/intel-arc-iris-xe-graphics-windows.html
-```
-
-### Verify OpenCL
-```powershell
-# Install clinfo (via Chocolatey)
-choco install clinfo
-
-# Or download from: https://github.com/Oblomov/clinfo
-
-# Check OpenCL devices
-clinfo
-```
+This project is CUDA-only. OpenCL is not supported. Systems without a compatible NVIDIA CUDA GPU cannot mine.
 
 ## Step 5: Install Development Tools
 
@@ -138,11 +113,8 @@ iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocola
 # Clone or navigate to project
 cd C:\Users\YourName\Projects\rust-miner
 
-# Build with CUDA (recommended)
+# Build (CUDA-only)
 cargo build --release --features cuda
-
-# Or build with all backends
-cargo build --release --features all-backends
 
 # Run
 .\target\release\rust-miner.exe
@@ -170,12 +142,13 @@ where.exe cl.exe
 # May need to run from "Developer PowerShell for VS"
 ```
 
-### OpenCL Not Found
+### "No CUDA device found"
 ```powershell
-# Check GPU drivers are up to date
-nvidia-smi  # For NVIDIA
+# Ensure your system has an NVIDIA GPU and drivers installed
+nvidia-smi
 
-# Reinstall GPU drivers
+# Verify CUDA Toolkit installation
+nvcc --version
 ```
 
 ### Slow Compilation
@@ -233,7 +206,7 @@ wsl
 bash setup.sh
 ```
 
-**Note**: WSL2 has limited GPU passthrough. CUDA may not work fully.
+**Note**: WSL2 supports CUDA with the NVIDIA WSL driver, but native Windows is recommended for best results.
 
 ## VSCode Setup (Windows)
 
