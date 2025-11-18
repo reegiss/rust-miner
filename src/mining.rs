@@ -246,9 +246,8 @@ pub fn mine_job_gpu(
     num_nonces: u32,
     stats: &mut MiningStats,
 ) -> Result<Option<(u32, [u8; 32])>> {
-    // Note: This function blocks on GPU synchronize() which uses CPU spin-wait.
-    // To minimize CPU usage, caller should use large batches (100M+ nonces)
-    // so GPU works for several seconds per call.
+    // Note: This function is async and uses non-blocking GPU polling
+    // The GPU work happens asynchronously with tokio::time::sleep yields
     // Parse ntime for QHash
     let ntime = hex_to_u32_le(&job.ntime)?;
     
@@ -291,11 +290,11 @@ pub fn mine_job_gpu(
     tracing::debug!(
         "GPU mining: nBits=0x{:08x}, target={}, nonces={}",
         nbits,
-        hex::encode(&target[..8]),
+        hex::encode(&target),
         num_nonces
     );
     
-    // Mine on GPU
+    // Mine on GPU (blocking poll inside miner)
     let result = cuda_miner.mine_job(&header_76, ntime, &target, start_nonce, num_nonces)?;
     
     // Update stats

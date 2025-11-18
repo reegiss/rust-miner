@@ -166,6 +166,38 @@ __device__ void sha256d_32(const uint8_t *input, uint8_t *output) {
 }
 
 /*
+ * SHA-256 of exactly 64 bytes (two-block processing due to padding)
+ */
+__device__ void sha256_64(const uint8_t *data, uint8_t *output) {
+    uint32_t hash[8];
+    uint8_t pad[64];
+
+    // Initialize hash with H0
+    for (int i = 0; i < 8; i++) {
+        hash[i] = H0[i];
+    }
+
+    // First block: the 64 bytes of input
+    sha256_transform(data, hash);
+
+    // Second block: 0x80 + zeros + message length (512 bits)
+    pad[0] = 0x80;
+    for (int i = 1; i < 62; i++) pad[i] = 0;
+    pad[62] = 0x02; // 512 bits = 0x0200
+    pad[63] = 0x00;
+
+    sha256_transform(pad, hash);
+
+    // Output final hash (big-endian)
+    for (int i = 0; i < 8; i++) {
+        output[i * 4] = (hash[i] >> 24) & 0xFF;
+        output[i * 4 + 1] = (hash[i] >> 16) & 0xFF;
+        output[i * 4 + 2] = (hash[i] >> 8) & 0xFF;
+        output[i * 4 + 3] = hash[i] & 0xFF;
+    }
+}
+
+/*
  * Split bytes into 4-bit nibbles
  */
 __device__ void split_nibbles(const uint8_t *data, uint8_t *nibbles, int len) {
@@ -245,6 +277,7 @@ extern "C" __global__ void qhash_mine(
     uint32_t start_nonce,            // Starting nonce
     const uint8_t *target,           // 32-byte target (big-endian)
     uint32_t *solution,              // Output: found nonce (or 0xFFFFFFFF if none)
+    uint8_t *found_hash,             // Output: 32-byte hash when solution found
     uint32_t num_threads             // Total threads
 ) {
     uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -280,8 +313,8 @@ extern "C" __global__ void qhash_mine(
     uint8_t quantum_output[32];
     for (int i = 0; i < 16; i++) {
         int16_t fp = to_fixed_point(expectations[i]);
-        quantum_output[i * 2] = (fp >> 8) & 0xFF;     // High byte
-        quantum_output[i * 2 + 1] = fp & 0xFF;        // Low byte
+        quantum_output[i * 2] = fp & 0xFF;            // Low byte (little-endian)
+        quantum_output[i * 2 + 1] = (fp >> 8) & 0xFF; // High byte
     }
     
     // Handle all-zero case
@@ -299,9 +332,17 @@ extern "C" __global__ void qhash_mine(
         }
     }
     
-    // Step 5: Final SHA256
+    // Step 5: Final SHA256 - hash1 concatenated with quantum_output
+    // Prepare input: 32 bytes (hash1) + 32 bytes (quantum_output) = 64 bytes
+    uint8_t final_input[64];
+    for (int i = 0; i < 32; i++) {
+        final_input[i] = hash1[i];
+        final_input[i + 32] = quantum_output[i];
+    }
+    
     uint8_t final_hash[32];
-    sha256d_32(quantum_output, final_hash);
+    sha256_64(final_input, final_hash);
+
     
     // Check if hash meets target (big-endian comparison)
     bool meets_target = true;
@@ -315,8 +356,15 @@ extern "C" __global__ void qhash_mine(
         // Continue if equal
     }
     
-    // If found, store nonce atomically
+    // If found, store nonce and hash atomically
     if (meets_target) {
-        atomicMin(solution, nonce);
+        // Use atomicCAS to ensure only first thread writes
+        uint32_t old = atomicCAS(solution, 0xFFFFFFFF, nonce);
+        if (old == 0xFFFFFFFF) {
+            // This thread won the race - write the hash
+            for (int i = 0; i < 32; i++) {
+                found_hash[i] = final_hash[i];
+            }
+        }
     }
 }

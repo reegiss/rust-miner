@@ -12,42 +12,10 @@ mod stratum;
 
 use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus};
-use mining::{mine_job_cpu, MiningStats};
+use mining::MiningStats;
 use stratum::{StratumClient, StratumConfig};
 
-/// CPU mining fallback (small chunks for responsiveness)
-async fn mine_cpu_fallback(
-    stratum_client: &StratumClient,
-    job: &stratum::protocol::StratumJob,
-    extranonce1: &str,
-    extranonce2: &[u8],
-    stats: &mut MiningStats,
-) -> Option<(u32, [u8; 32])> {
-    let chunk_size = 50_000u32;
-    let mut start_nonce = 0u32;
-    
-    loop {
-        // Check for new job
-        if stratum_client.has_pending_job().await {
-            break;
-        }
-        
-        let end_nonce = start_nonce.saturating_add(chunk_size);
-        
-        match mine_job_cpu(job, extranonce1, extranonce2, start_nonce, end_nonce, stats) {
-            Ok(Some((nonce, hash))) => return Some((nonce, hash)),
-            Ok(None) => {
-                start_nonce = end_nonce;
-                if start_nonce < chunk_size {
-                    break; // Wrapped around
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    
-    None
-}
+// CPU fallback removed by design. This miner requires a compatible GPU.
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -94,11 +62,7 @@ async fn main() -> Result<()> {
         println!("{:<15} {}", "GPU:".green(), gpu.bright_white());
     }
     
-    if args.opencl {
-        println!("{:<15} {}", "Backend:".green(), "OpenCL".bright_white());
-    } else {
-        println!("{:<15} {}", "Backend:".green(), "CUDA (default)".bright_white());
-    }
+    println!("{:<15} {}", "Backend:".green(), "CUDA".bright_white());
     
     println!();
 
@@ -110,11 +74,10 @@ async fn main() -> Result<()> {
         Err(e) => {
             eprintln!("\n{}", "❌ GPU Detection Failed!".red().bold());
             eprintln!("{}", format!("   Error: {}", e).red());
-            eprintln!("\n{}", "This application requires a GPU with CUDA or OpenCL support.".yellow());
+            eprintln!("\n{}", "This application requires a GPU with CUDA support.".yellow());
             eprintln!("{}", "Please ensure:".yellow());
             eprintln!("{}", "  • GPU drivers are installed".yellow());
             eprintln!("{}", "  • CUDA Toolkit installed (for NVIDIA)".yellow());
-            eprintln!("{}", "  • OpenCL runtime installed (for AMD/Intel)".yellow());
             eprintln!("\n{}", "See SETUP.md for installation instructions.".cyan());
             std::process::exit(1);
         }
@@ -175,7 +138,7 @@ async fn main() -> Result<()> {
     println!("\n{}", "=== Mining Status ===".cyan().bold());
     println!("{}", "Waiting for jobs from pool...".yellow());
     
-    // Initialize CUDA miner if available
+    // Initialize CUDA miner (required for now). If it fails, exit with an error.
     #[cfg(feature = "cuda")]
     let cuda_miner = {
         tracing::info!("Initializing CUDA miner...");
@@ -188,20 +151,24 @@ async fn main() -> Result<()> {
                 println!("   {} {}.{}", "Compute Capability:".green(), cc_major, cc_minor);
                 println!("   {} Using CUDA kernel", "Mode:".green());
                 println!();
-                Some(miner)
+                miner
             }
             Err(e) => {
-                eprintln!("\n{}", "⚠️  CUDA initialization failed!".yellow().bold());
-                eprintln!("   {}", format!("Error: {}", e).yellow());
-                eprintln!("   {}", "Falling back to CPU mining...".yellow());
-                println!();
-                None
+                eprintln!("\n{}", "❌ CUDA initialization failed!".red().bold());
+                eprintln!("   {}", format!("Error: {}", e).red());
+                eprintln!("\n{}", "This application requires a compatible NVIDIA GPU (CUDA).".yellow());
+                eprintln!("{}", "Build with --features cuda and ensure NVIDIA drivers and CUDA toolkit are installed.".yellow());
+                anyhow::bail!("CUDA initialization failed: {e}");
             }
         }
     };
     
     #[cfg(not(feature = "cuda"))]
-    let cuda_miner: Option<()> = None;
+    {
+        eprintln!("\n{}", "❌ No GPU backend compiled!".red().bold());
+        eprintln!("{}", "This build has no CUDA support. Compile with --features cuda.".yellow());
+        anyhow::bail!("No GPU backend compiled");
+    }
     
     // Mining statistics
     let mut stats = MiningStats::new();
@@ -265,11 +232,13 @@ async fn main() -> Result<()> {
                 
                 let start_time = std::time::Instant::now();
                 
-                // Choose mining method based on CUDA availability
+                // GPU mining (CUDA required at this stage)
                 #[cfg(feature = "cuda")]
-                let mining_result = if let Some(miner) = cuda_miner.clone() {
-                    // GPU Mining with NON-BLOCKING polling (low CPU usage like wildrig-multi)
-                    let chunk_size = 10_000_000u32; // 10M nonces per call (~500ms GPU time)
+                let mining_result = {
+                    let miner = cuda_miner.clone();
+                    // GPU Mining with adaptive batch sizing & polling
+                    // Start with a larger batch to reduce host<->device churn
+                    let mut chunk_size = 50_000_000u32; // initial 50M nonces (~>500ms target)
                     let mut current_nonce = 0u32;
                     let mut found_share = None;
                     let mut iterations = 0u32;
@@ -286,17 +255,16 @@ async fn main() -> Result<()> {
                             break 'gpu_mining;
                         }
                         
-                        // Clone data for blocking thread
+                        let nonce_start = current_nonce;
+                        
+                        // Run GPU mining in blocking thread (off main async reactor)
+                        let miner_clone = miner.clone();
                         let job_clone = job.clone();
                         let extranonce1_clone = extranonce1.clone();
                         let extranonce2_clone = extranonce2.clone();
-                        let miner_clone = miner.clone();
-                        let nonce_start = current_nonce; // Capture current value
-                        
-                        // Run GPU mining in blocking thread pool (doesn't block tokio runtime)
                         let result = tokio::task::spawn_blocking(move || {
                             let mut local_stats = MiningStats::new();
-                            crate::mining::mine_job_gpu(
+                            let mining_result = crate::mining::mine_job_gpu(
                                 &miner_clone,
                                 &job_clone,
                                 &extranonce1_clone,
@@ -304,30 +272,50 @@ async fn main() -> Result<()> {
                                 nonce_start,
                                 chunk_size,
                                 &mut local_stats
-                            )
+                            );
+                            // Return both result and stats
+                            (mining_result, local_stats)
                         }).await;
-                        
+
                         match result {
-                            Ok(Ok(Some((nonce, hash)))) => {
-                                stats.hashes += chunk_size as u64;
+                            Ok((Ok(Some((nonce, hash))), local_stats)) => {
+                                // Merge stats
+                                stats.hashes += local_stats.hashes;
                                 stats.shares_found += 1;
                                 found_share = Some((nonce, hash));
                                 break 'gpu_mining;
                             }
-                            Ok(Ok(None)) => {
+                            Ok((Ok(None), local_stats)) => {
+                                // Merge stats
+                                stats.hashes += local_stats.hashes;
                                 // Continue to next chunk
                                 iterations += 1;
-                                stats.hashes += chunk_size as u64;
                                 
-                                // Print hashrate every 100 iterations
-                                if iterations % 100 == 0 {
+                                // Adaptive chunk sizing based on last kernel duration
+                                if let Some(ms) = Some(miner.last_kernel_ms()) {
+                                    if ms > 0 {
+                                        // Target window ~700-900ms
+                                        if ms < 400 && chunk_size < 150_000_000 {
+                                            // Increase by 25%
+                                            chunk_size = (chunk_size as f64 * 1.25) as u32;
+                                        } else if ms > 1200 && chunk_size > 5_000_000 {
+                                            // Decrease by 20%
+                                            chunk_size = (chunk_size as f64 * 0.80) as u32;
+                                        }
+                                    }
+                                }
+
+                                // Print hashrate & tuning info every 25 iterations
+                                if iterations % 25 == 0 {
                                     let elapsed = start_time.elapsed();
                                     if elapsed.as_secs() > 0 {
                                         let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
                                         tracing::info!(
-                                            "GPU: {} hashes | {:.2} MH/s",
+                                            "GPU: {} hashes | {:.2} MH/s | batch={} | last_kernel={}ms",
                                             stats.hashes,
-                                            hashrate / 1_000_000.0
+                                            hashrate / 1_000_000.0,
+                                            chunk_size,
+                                            miner.last_kernel_ms()
                                         );
                                     }
                                 }
@@ -337,28 +325,22 @@ async fn main() -> Result<()> {
                                     // Wrapped around
                                     break 'gpu_mining;
                                 }
-                                // No artificial sleep - cuStreamQuery polling already includes 1ms sleep
                             }
-                            Ok(Err(e)) => {
+                            Ok((Err(e), _local_stats)) => {
                                 eprintln!("   {} GPU mining error: {}", "❌".red(), e);
                                 tracing::error!("GPU error details: {:?}", e);
                                 break 'gpu_mining;
                             }
-                            Err(e) => {
-                                eprintln!("   {} Task join error: {}", "❌".red(), e);
+                            Err(join_err) => {
+                                eprintln!("   {} GPU task join error: {}", "❌".red(), join_err);
                                 break 'gpu_mining;
                             }
                         }
                     }
                     
                     found_share
-                } else {
-                    // Fallback to CPU if CUDA init failed
-                    mine_cpu_fallback(&stratum_client, &job, &extranonce1, &extranonce2, &mut stats).await
                 };
                 
-                #[cfg(not(feature = "cuda"))]
-                let mining_result = mine_cpu_fallback(&stratum_client, &job, &extranonce1, &extranonce2, &mut stats).await;
                 
                 // Process mining result
                 if let Some((nonce, hash)) = mining_result {
@@ -405,14 +387,7 @@ async fn main() -> Result<()> {
                     };
                     
                     #[cfg(feature = "cuda")]
-                    if cuda_miner.is_some() {
-                        tracing::debug!("No share found | {:.2} MH/s", hashrate / 1_000_000.0);
-                    } else {
-                        tracing::debug!("No share found | {:.2} kH/s", hashrate / 1_000.0);
-                    }
-                    
-                    #[cfg(not(feature = "cuda"))]
-                    tracing::debug!("No share found | {:.2} kH/s", hashrate / 1_000.0);
+                    tracing::debug!("No share found | {:.2} MH/s (GPU)", hashrate / 1_000_000.0);
                 }
                 
                 // Display statistics every 5 jobs

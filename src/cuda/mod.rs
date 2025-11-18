@@ -3,10 +3,11 @@ use anyhow::{anyhow, Result};
 use cudarc::driver::*;
 use cudarc::nvrtc::compile_ptx;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Import raw CUDA API for non-blocking polling
 use cudarc::driver::sys::lib;
-use cudarc::driver::sys::{CUstream, CUresult};
+use cudarc::driver::sys::CUresult;
 
 const CUDA_KERNEL_SRC: &str = include_str!("qhash.cu");
 
@@ -14,6 +15,7 @@ const CUDA_KERNEL_SRC: &str = include_str!("qhash.cu");
 pub struct CudaMiner {
     device: Arc<CudaDevice>,
     func: CudaFunction,
+    last_kernel_ms: Arc<AtomicU64>, // duration of last kernel for adaptive polling
 }
 
 impl CudaMiner {
@@ -41,11 +43,12 @@ impl CudaMiner {
         Ok(Self {
             device,
             func,
+            last_kernel_ms: Arc::new(AtomicU64::new(0)),
         })
     }
     
-    /// Mine a job on GPU
-    /// 
+    /// Mine a job on GPU (blocking, low CPU via driver polling + sleep)
+    ///
     /// Returns Option<(nonce, hash)> if a valid share is found
     pub fn mine_job(
         &self,
@@ -62,6 +65,10 @@ impl CudaMiner {
         // Solution buffer (initialized to 0xFFFFFFFF = no solution)
         let h_solution = vec![0xFFFFFFFFu32];
         let d_solution = self.device.htod_copy(h_solution.clone())?;
+        
+        // Hash output buffer (32 bytes, will be populated if solution found)
+        let h_found_hash = vec![0u8; 32];
+        let d_found_hash = self.device.htod_copy(h_found_hash.clone())?;
         
         // Launch configuration
         // Note: qhash kernel is complex and uses many registers
@@ -93,33 +100,36 @@ impl CudaMiner {
                         start_nonce,
                         &d_target,
                         &d_solution,
+                        &d_found_hash,
                         num_nonces,
                     ),
                 )
                 .map_err(|e| anyhow!("Kernel launch failed: {}", e))?;
         }
         
-        // Use NON-BLOCKING polling instead of synchronize() to reduce CPU usage
-        // This is how miners like wildrig-multi achieve <1% CPU usage
-        let stream = unsafe { *self.device.cu_stream() };
-        
+        // Non-blocking driver polling with adaptive sleep (host thread, not async)
+        let stream = *self.device.cu_stream();
+        let poll_start = std::time::Instant::now();
+        let mut poll_iterations = 0u32;
+        tracing::debug!("GPU poll start: nonces={}", num_nonces);
         loop {
             let result = unsafe { lib().cuStreamQuery(stream) };
-            
             match result {
                 CUresult::CUDA_SUCCESS => {
-                    // Kernel finished
+                    let elapsed = poll_start.elapsed();
+                    let ms = (elapsed.as_secs_f64() * 1000.0) as u64;
+                    self.last_kernel_ms.store(ms, Ordering::Relaxed);
+                    tracing::debug!("GPU poll done: iters={} elapsed_ms={} batch_nonces={}", poll_iterations, ms, num_nonces);
                     break;
                 }
                 CUresult::CUDA_ERROR_NOT_READY => {
-                    // Kernel still running - sleep to avoid busy-wait
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                    continue;
+                    poll_iterations += 1;
+                    // Aim ~16 polls per kernel, clamp range
+                    let last = self.last_kernel_ms.load(Ordering::Relaxed);
+                    let interval_ms = if last == 0 { 8 } else { (last / 16).clamp(2, 40) };
+                    std::thread::sleep(std::time::Duration::from_millis(interval_ms));
                 }
-                _ => {
-                    // Error occurred
-                    return Err(anyhow!("Stream query failed: {:?}", result));
-                }
+                _ => return Err(anyhow!("Stream query failed: {:?}", result)),
             }
         }
         
@@ -133,28 +143,16 @@ impl CudaMiner {
             // No solution found
             Ok(None)
         } else {
-            // Solution found! Compute the hash on CPU for verification
-            let hash = self.compute_hash_cpu(block_header, found_nonce, ntime)?;
+            // Solution found! Read hash from GPU (no CPU recomputation needed)
+            let mut h_found_hash_result = vec![0u8; 32];
+            self.device.dtoh_sync_copy_into(&d_found_hash, &mut h_found_hash_result)?;
+            
+            let hash: [u8; 32] = h_found_hash_result
+                .try_into()
+                .map_err(|_| anyhow!("Failed to convert hash vector to array"))?;
+            
             Ok(Some((found_nonce, hash)))
         }
-    }
-    
-    /// Compute qhash on CPU (for verification)
-    fn compute_hash_cpu(
-        &self,
-        block_header: &[u8; 76],
-        nonce: u32,
-        ntime: u32,
-    ) -> Result<[u8; 32]> {
-        use crate::algorithms::qhash::QHash;
-        use crate::algorithms::HashAlgorithm;
-        
-        let mut header = [0u8; 80];
-        header[..76].copy_from_slice(block_header);
-        header[76..80].copy_from_slice(&nonce.to_le_bytes());
-        
-        let qhash = QHash::new(ntime);
-        Ok(qhash.hash(&header))
     }
     
     /// Get device name
@@ -168,6 +166,11 @@ impl CudaMiner {
         let major = self.device.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
         let minor = self.device.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
         Ok((major, minor))
+    }
+
+    /// Get last kernel duration in milliseconds (0 if none yet)
+    pub fn last_kernel_ms(&self) -> u64 {
+        self.last_kernel_ms.load(Ordering::Relaxed)
     }
 }
 

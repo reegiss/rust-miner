@@ -28,9 +28,7 @@ pub struct Args {
     #[arg(short, long, value_name = "DEVICES")]
     pub gpu: Option<String>,
 
-    /// Use OpenCL backend instead of CUDA
-    #[arg(long)]
-    pub opencl: bool,
+    // OpenCL backend is not supported in this project. CUDA-only.
 
     /// Number of threads for work distribution (default: auto)
     #[arg(short, long, value_name = "THREADS")]
@@ -60,7 +58,7 @@ pub fn display_banner() {
         "║".bright_cyan(),
         "🦀 rust-miner - GPU Cryptocurrency Miner".bright_white().bold(),
         "║".bright_cyan(),
-        format!("   Version {} | CUDA + OpenCL Support", env!("CARGO_PKG_VERSION")).bright_green(),
+    format!("   Version {} | CUDA Support", env!("CARGO_PKG_VERSION")).bright_green(),
         "╠════════════════════════════════════════════════════════════╣".bright_cyan(),
         "║".bright_cyan(),
         "⚡ High Performance | Cross-Platform | GPU Required".yellow(),
