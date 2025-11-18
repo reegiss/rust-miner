@@ -1,85 +1,104 @@
-# Estratégia de Otimização de Hashrate: SHA256 em PTX Assembly
+# Estratégia de Otimização de Hashrate: CUDA Kernel Tuning
 
 ## 📊 Estado Atual
-- **Hashrate Atual**: ~37 MH/s (GTX 1660 SUPER)
-- **Target**: ~500 MH/s (13.5x de melhoria)
-- **Gargalo Principal**: SHA256 C++ em loop (sha256_transform)
-- **Limite Atingido**: Unroll loops em C++ não é suficiente
+- **Hashrate Atual**: ~37 MH/s baseline (GTX 1660 SUPER, CC 7.5)
+- **Picos Observados**: 12-253 MH/s (kernel variável)
+- **Target**: ~200+ MH/s sustentável (5-6x de melhoria)
+- **Gargalo Principal**: Kernel execution time ~480ms por bloco
 
-## 🎯 Objetivo
-Substituir o `sha256_transform` em C++ por **PTX inline assembly** para:
-1. Reduzir latência de memória (usar registros ao invés de stack)
-2. Explorar paralelismo de warp com instrução `shfl.sync`
-3. Usar `add.cc` (add-with-carry) para operações otimizadas
-4. Eliminar overhead de branches no loop de 64 rounds
+## 🎯 Objetivos Realistas
+1. **Reduzir latência do kernel** através de loop unrolling mais agressivo
+2. **Aumentar occupancy** do warp scheduler (atualmente 512 threads/block)
+3. **Otimizar memory access patterns** em quantum_simulation
+4. **Melhorar instruction-level parallelism (ILP)** no SHA256
 
-## 📚 Análise de Código Encontrado
+## 📚 Abordagens Testadas
 
-### Fonte: ccminer (tpruvot)
-- `scrypt/sha256.cu`: Implementação CUDA com RNDr macro otimizado
-- `scrypt.cpp`: Versão vectorizada com SSE/AVX para CPU
-- Padrão: RNDr(S, W, i) expande para operações com `add`, `xor`, `rotr`
+### ❌ Tentativa 1: PTX Inline Assembly (FALHADA)
+- Implementado `shf.r.wrap.b32` para rotações PTX
+- **Resultado**: Hashrate caiu de 37 MH/s para 12 MH/s
+- **Razão**: Overhead de multiple function calls vs. macro expansion
+- **Lição**: Compiler C++ do NVRTC já otimiza bem; assembly inline não garantida melhoria
 
-### Macro Crítico Encontrado
-```c
-#define RND(a, b, c, d, e, f, g, h, k) \
-	do { \
-		t0 = h + S1(e) + Ch(e, f, g) + k; \
-		t1 = S0(a) + Maj(a, b, c); \
-		d += t0; \
-		h  = t0 + t1; \
-	} while (0)
+## ✅ Abordagens Comprovadas (A Implementar)
+
+### Fase 1: Loop Unrolling Agressivo no SHA256
+```cuda
+// Atual: #pragma unroll 64
+// Melhorado: Manual unrolling com grupos de 8 rounds
+
+// Maximize ILP: 8 rounds simultâneos em registros
+RND_0(); RND_1(); RND_2(); RND_3();
+RND_4(); RND_5(); RND_6(); RND_7();
+// GPU executa estas em paralelo antes de sincronizar
 ```
 
-Isto é executado 64 vezes por bloco. **Este é o gargalo.**
+### Fase 2: Warp-Level Optimization com __shfl_sync
+```cuda
+// Em quantum_simulation: substituir shared_expectations[] com shuffles
+float my_val = expectations[tid];
+float left = __shfl_up_sync(0xFFFFFFFF, my_val, 1);
+float right = __shfl_down_sync(0xFFFFFFFF, my_val, 1);
+// Reduz bank conflicts em shared memory
+```
 
-## 🔧 Estratégia de Implementação (PTX)
+### Fase 3: Register Pressure Tuning
+- Verificar `-Xptxas -O3` flag
+- Usar `maxregcount` para balancear occupancy vs. performance
+- Target: 64-96 registros/thread (máximo para SM 7.5)
 
-### Fase 1: Extrair SHA256 para PTX Inline Assembly
-1. Mover o loop de 64 RNDr para `asm volatile` com registros
-2. Usar PTX `add.cc` e `addc` para operações com carry
-3. Manter W[64] em registros (ou cache local otimizado)
+## 🔬 Métricas de Sucesso
 
-### Fase 2: Paralelismo de Warp
-1. Usar `__shfl_sync` para partilhar valores de S[i] entre threads num warp
-2. Executar SHA256 em paralelo em múltiplos nonces
+| Métrica | Baseline | Target | Método |
+|---------|----------|--------|--------|
+| Hashrate | 37 MH/s | 150+ MH/s | Loop unroll + warp opt |
+| Kernel Time | 480 ms | 100-150 ms | Reduzir branch divergence |
+| Occupancy | 50% | 75%+ | Register tuning |
+| Power Eff | 0.9 MH/W | 2.5+ MH/W | Instruction/clock |
 
-### Fase 3: Otimizações Secundárias
-1. Precompute K[64] no kernel (em `__constant__`)
-2. Loop unrolling manual em PTX (cada round é uma sequência de PTX)
-3. Reduzir memory pressure com coalescing otimizado
+## � Plano de Ação (ATUALIZADO)
 
-## 📝 Próximos Passos
+### [PASSO 1] Implementar Loop Unrolling Manual (Esta Semana)
+- [ ] Reescrever sha256_transform com 8 rounds por iteração
+- [ ] Testar compilação sem warnings
+- [ ] Benchmark: comparar vs. #pragma unroll 64
 
-### [TAREFA 1.1] Pesquisa de Implementação Existente
-- [ ] Procurar `wildrig-multi` (open-source, também usa CUDA QHash)
-- [ ] Procurar repositórios de mining CUDA especializados
-- [ ] Validar que PTX assembly é a abordagem correta
+### [PASSO 2] Warp-Level Optimizations (Próxima)  
+- [ ] Substituir shared_expectations[] com __shfl_sync
+- [ ] Medir redução de shared memory bank conflicts
+- [ ] Benchmark: comparar vs. shared memory baseline
 
-### [TAREFA 1.2] Prototipagem de PTX Inline Assembly
-- [ ] Criar função `__device__ void sha256_transform_asm(uint32_t *state, uint32_t *block)`
-- [ ] Implementar 2-3 rounds em PTX como prova de conceito
-- [ ] Medir redução de latência vs. versão C++
+### [PASSO 3] Register Pressure Tuning (Validação)
+- [ ] Profiling com `nvprof --metrics achieved_occupancy`
+- [ ] Ajustar maxregcount conforme necessário
+- [ ] Final benchmark com ambos otimizações
 
-### [TAREFA 1.3] Deploy Completo
-- [ ] Portar todos os 64 rounds para PTX
-- [ ] Integrar com kernel QHash existente
-- [ ] Testar hashrate completo
+### [PASSO 4] Git Commit & Documentation
+- [ ] Commit cada mudança com medições
+- [ ] Documentar resultados reais vs. targets
+- [ ] Push para mainline
 
-## ⚠️ Considerações de Risco
+## ⚖️ Trade-offs
 
-1. **Compatibilidade de GPU**: PTX é versionado. Precisamos de SM 3.5+ (GTX 750 Ti, 9xx, 10xx+)
-2. **Debugging**: PTX é complexo; erros podem causar silent corruption
-3. **Maintenance**: Código PT é mais difícil de manter que C++
-4. **Fallback**: Manter versão C++ como fallback se PTX compilar com erros
+| Abordagem | Pros | Cons |
+|-----------|------|------|
+| PTX Inline | Total control, max perf potential | Complexo, difícil debug, breaking changes |
+| __shfl_sync | Pronto, documentado, comprovado | Memória ainda usada em outros contextos |
+| Loop Unroll Manual | Simples, predictável | Mais código, menos flexible |
 
-## 📦 Implementação Alternativa (Mais Segura)
+## �️ Ferramentas de Profiling
 
-Se PTX assembly for demasiado complexo, investigar:
-1. **ONNX Runtime** ou **TVM** para geração de código otimizado
-2. **Blocos de C++ com `#pragma unroll`** e `-O3 optimization flags`
-3. **Splittar SHA256 em múltiplos kernels** para reduzir latência
+```bash
+# Profiling detalhado
+nvprof --metrics all ./target/release/rust-miner ...
+
+# Análise de occupancy
+nvprof --events all ./target/release/rust-miner ...
+
+# PTX inspection
+nvdisasm -c sm_75 kernel.ptx | grep -E "sha256|quantum"
+```
 
 ---
 
-**Próximo**: [PESQUISAR: "wildrig-multi cuda qhash"] para validar arquitetura
+**Status**: Pronto para [PASSO 1] implementação de Loop Unrolling Manual
