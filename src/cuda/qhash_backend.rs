@@ -42,8 +42,9 @@ impl MiningBackend for QHashCudaBackend {
         let nbits = u32::from_be_bytes([nbits_bytes[0], nbits_bytes[1], nbits_bytes[2], nbits_bytes[3]]);
         let target = nbits_to_target(nbits);
         
-        // Calculate merkle root
-        let merkle_root = calculate_merkle_root(job, extranonce1, extranonce2)?;
+    // Calculate merkle root (SHA256d output is big-endian) and convert to little-endian for header
+    let mut merkle_root = calculate_merkle_root(job, extranonce1, extranonce2)?;
+    merkle_root.reverse(); // Critical: block header stores merkle root little-endian
         
         // Build block header WITHOUT nonce (76 bytes)
         let mut header_76 = [0u8; 76];
@@ -65,8 +66,8 @@ impl MiningBackend for QHashCudaBackend {
         }
         header_76[4..36].copy_from_slice(&prevhash);
         
-        // Merkle root (32 bytes, little-endian)
-        header_76[36..68].copy_from_slice(&merkle_root);
+    // Merkle root (32 bytes, now little-endian after reverse)
+    header_76[36..68].copy_from_slice(&merkle_root);
         
         // nTime (4 bytes, little-endian)
         header_76[68..72].copy_from_slice(&ntime.to_le_bytes());
