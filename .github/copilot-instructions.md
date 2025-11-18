@@ -343,8 +343,7 @@ src/
 │   ├── mod.rs           # Public API
 │   ├── engine.rs        # Mining logic
 │   ├── backend.rs       # Backend trait and detection
-│   ├── cuda.rs          # CUDA implementation
-│   └── opencl.rs        # OpenCL implementation
+│   └── cuda.rs          # CUDA implementation (only backend)
 ├── blockchain/
 │   ├── mod.rs
 │   ├── client.rs        # Network client

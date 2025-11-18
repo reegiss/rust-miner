@@ -78,11 +78,7 @@ $env:PATH = "$env:CUDA_PATH\bin;$env:PATH"
 [Environment]::SetEnvironmentVariable("PATH", "$env:CUDA_PATH\bin;$env:PATH", "Machine")
 ```
 
-## Step 4: (Skip) OpenCL
-
-This project is CUDA-only. OpenCL is not supported. Systems without a compatible NVIDIA CUDA GPU cannot mine.
-
-## Step 5: Install Development Tools
+## Step 4: Install Development Tools
 
 ### Git for Windows
 ```powershell

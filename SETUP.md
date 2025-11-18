@@ -174,7 +174,6 @@ nvidia-smi
 - [ ] Install components: clippy, rustfmt, rust-analyzer
 - [ ] Install CUDA Toolkit 12.x+ (PRIORITY)
 - [ ] Verify nvcc and nvidia-smi working
-- [ ] Verify clinfo (if installed OpenCL)
 - [ ] Install profiling tools (perf, valgrind)
 - [ ] Install cargo-flamegraph
 - [ ] Configure ~/.cargo/config.toml for optimization

@@ -93,30 +93,7 @@ if command -v nvidia-smi &> /dev/null; then
     fi
     
     echo ""
-    echo "Installing OpenCL as fallback..."
 fi
-
-# Install OpenCL support (fallback or non-NVIDIA)
-if ! check_command clinfo; then
-    echo "Installing OpenCL runtime..."
-    sudo apt update
-    sudo apt install -y ocl-icd-libopencl1 opencl-headers clinfo
-    
-    # Install NVIDIA OpenCL support if NVIDIA GPU detected
-    if command -v nvidia-smi &> /dev/null; then
-        echo "Installing NVIDIA OpenCL support (fallback backend)..."
-        DRIVER_VERSION=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | cut -d'.' -f1)
-        sudo apt install -y nvidia-opencl-icd-${DRIVER_VERSION} 2>/dev/null || \
-        sudo apt install -y nvidia-opencl-icd || \
-        echo -e "${YELLOW}⚠${NC} Could not install NVIDIA OpenCL, may need manual installation"
-    fi
-    
-    echo -e "${GREEN}✓${NC} OpenCL support installed (fallback)"
-else
-    echo -e "${GREEN}✓${NC} OpenCL already available"
-fi
-
-echo ""
 
 # Step 5: Install development tools
 echo "🔧 Installing development tools..."
@@ -220,20 +197,14 @@ if command -v nvidia-smi &> /dev/null; then
     fi
 fi
 
-if command -v clinfo &> /dev/null; then
-    OPENCL_DEVICES=$(clinfo 2>/dev/null | grep -c "Device Name" || echo "0")
-    echo "  • OpenCL devices: $OPENCL_DEVICES (fallback backend)"
-fi
-
 echo ""
-echo "Backend Priority: CUDA → OpenCL → CPU"
+echo "Backend: CUDA (NVIDIA GPUs only)"
 echo ""
 echo "Next steps:"
 echo "  1. Review .github/copilot-instructions.md for coding guidelines"
 echo "  2. Review SETUP.md for detailed environment info"
 echo "  3. Start coding: edit src/main.rs"
 echo "  4. Build with CUDA: cargo build --release --features cuda"
-echo "  5. Build with all backends: cargo build --release --features all-backends"
-echo "  6. Run tests: cargo test --features cuda"
+echo "  5. Run tests: cargo test --features cuda"
 echo ""
 echo "Happy mining! 🚀"
