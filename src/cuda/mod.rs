@@ -76,12 +76,11 @@ impl CudaMiner {
         let d_found_hash = self.device.htod_copy(h_found_hash.clone())?;
         
         // Launch configuration - optimized for QHash
-        // OPTIMIZATION PHASE 1: Reduce warp divergence
-        // Quantum simulation only uses 16 threads, other 496 are idle waiting in syncthreads()
-        // Reducing to 64 threads/block reduces warp divergence overhead
-        // This may reduce occupancy but increases per-thread efficiency
-        // Test target: compare 37 MH/s baseline vs. 64-thread variant
-        let threads_per_block = 64;
+        // OPTIMIZATION PHASE 1: Balanced threads_per_block
+        // Previous: 512 (480ms kernel), 64 (410ms), 32 (416ms)
+        // Trying: 128 threads/block (4 warps) for better occupancy-efficiency tradeoff
+        // Hypothesis: Some occupancy benefit + reduced divergence overhead
+        let threads_per_block = 128;
         let num_blocks = (num_nonces + threads_per_block - 1) / threads_per_block;
         
         tracing::debug!(
