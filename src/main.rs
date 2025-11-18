@@ -265,12 +265,6 @@ async fn main() -> Result<()> {
                             break 'gpu_mining;
                         }
                         
-                        // Check for new job every 10 iterations
-                        if iterations % 10 == 0 && stratum_client.has_pending_job().await {
-                            println!("   {} Switching to new job", "🔄".yellow());
-                            break 'gpu_mining;
-                        }
-                        
                         let nonce_start = current_nonce;
                         
                         // Run GPU mining in blocking thread (off main async reactor)
@@ -305,21 +299,22 @@ async fn main() -> Result<()> {
                                 iterations += 1;
                                 
                                 // Adaptive chunk sizing based on last kernel duration
-                                if let Some(ms) = Some(backend_clone.last_kernel_ms()) {
-                                    if ms > 0 {
-                                        // Target window ~700-900ms
-                                        if ms < 400 && chunk_size < 150_000_000 {
-                                            // Increase by 25%
-                                            chunk_size = (chunk_size as f64 * 1.25) as u32;
-                                        } else if ms > 1200 && chunk_size > 5_000_000 {
-                                            // Decrease by 20%
-                                            chunk_size = (chunk_size as f64 * 0.80) as u32;
-                                        }
-                                    }
-                                }
+                                // DISABLED FOR NOW: Testing with fixed 50M nonces
+                                // if let Some(ms) = Some(backend_clone.last_kernel_ms()) {
+                                //     if ms > 0 {
+                                //         // Target window ~700-900ms
+                                //         if ms < 400 && chunk_size < 150_000_000 {
+                                //             // Increase by 25%
+                                //             chunk_size = (chunk_size as f64 * 1.25) as u32;
+                                //         } else if ms > 1200 && chunk_size > 5_000_000 {
+                                //             // Decrease by 20%
+                                //             chunk_size = (chunk_size as f64 * 0.80) as u32;
+                                //         }
+                                //     }
+                                // }
 
-                                // Print hashrate & tuning info every 25 iterations
-                                if iterations % 25 == 0 {
+                                // Print hashrate & tuning info every 100 iterations (less frequently)
+                                if iterations % 100 == 0 {
                                     let elapsed = start_time.elapsed();
                                     if elapsed.as_secs() > 0 {
                                         let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
@@ -360,6 +355,12 @@ async fn main() -> Result<()> {
                                     }
                                         // Also print a WildRig-like statistics block every time we log
                                         print_wildrig_stats(&backend_clone, &hr_history, &stats)?;
+                                }
+                                
+                                // Check for new job AFTER batch completes (not during)
+                                if stratum_client.has_pending_job().await {
+                                    println!("   {} Switching to new job (after batch)", "🔄".yellow());
+                                    break 'gpu_mining;
                                 }
                                 
                                 current_nonce = current_nonce.wrapping_add(chunk_size);

@@ -16,8 +16,9 @@ use cudarc::driver::sys::CUresult;
 const CUDA_KERNEL_SRC: &str = include_str!("qhash.cu");
 
 /// Internal CUDA miner implementation (used by backends)
+/// Made public for benchmarking
 #[derive(Clone)]
-pub(crate) struct CudaMiner {
+pub struct CudaMiner {
     device: Arc<CudaDevice>,
     func: CudaFunction,
     last_kernel_ms: Arc<AtomicU64>, // duration of last kernel for adaptive polling
@@ -25,7 +26,7 @@ pub(crate) struct CudaMiner {
 
 impl CudaMiner {
     /// Create new CUDA miner
-    pub(crate) fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         // Initialize CUDA device
         let device = CudaDevice::new(0)?;
         
@@ -55,7 +56,7 @@ impl CudaMiner {
     /// Mine a job on GPU (blocking, low CPU via driver polling + sleep)
     ///
     /// Returns Option<(nonce, hash)> if a valid share is found
-    pub(crate) fn mine_job(
+    pub fn mine_job(
         &self,
         block_header: &[u8; 76],  // Header without nonce (76 bytes)
         ntime: u32,                // Network time
@@ -75,12 +76,11 @@ impl CudaMiner {
         let h_found_hash = vec![0u8; 32];
         let d_found_hash = self.device.htod_copy(h_found_hash.clone())?;
         
-        // Launch configuration - optimized for QHash
-        // OPTIMIZATION PHASE 1: Balanced threads_per_block
-        // Previous: 512 (480ms kernel), 64 (410ms), 32 (416ms)
-        // Trying: 128 threads/block (4 warps) for better occupancy-efficiency tradeoff
-        // Hypothesis: Some occupancy benefit + reduced divergence overhead
-        let threads_per_block = 128;
+        // Launch configuration - testing for occupancy optimization
+        // Baseline (Phase 1): 128 threads/block (12.5% occupancy, 37 MH/s, 400ms kernel)
+        // Testing range: 64, 96, 128, 192, 256, 384, 512
+        // Goal: Find optimal threads_per_block for GTX 1660 SUPER (CC 7.5)
+        let threads_per_block = 256;
         let num_blocks = (num_nonces + threads_per_block - 1) / threads_per_block;
         
         tracing::debug!(
@@ -126,7 +126,8 @@ impl CudaMiner {
                     let elapsed = poll_start.elapsed();
                     let ms = (elapsed.as_secs_f64() * 1000.0) as u64;
                     self.last_kernel_ms.store(ms, Ordering::Relaxed);
-                    tracing::debug!("GPU poll done: iters={} elapsed_ms={} batch_nonces={}", poll_iterations, ms, num_nonces);
+                    let hashrate_mb_s = (num_nonces as f64 / 1_000_000.0) / (ms as f64 / 1000.0);
+                    tracing::info!("GPU poll done: iters={} elapsed_ms={} batch_nonces={} estimated_MH/s={:.1}", poll_iterations, ms, num_nonces, hashrate_mb_s);
                     break;
                 }
                 CUresult::CUDA_ERROR_NOT_READY => {
@@ -163,12 +164,12 @@ impl CudaMiner {
     }
     
     /// Get device name
-    pub(crate) fn device_name(&self) -> Result<String> {
+    pub fn device_name(&self) -> Result<String> {
         Ok(self.device.name()?)
     }
     
     /// Get device compute capability
-    pub(crate) fn compute_capability(&self) -> Result<(i32, i32)> {
+    pub fn compute_capability(&self) -> Result<(i32, i32)> {
         use cudarc::driver::sys::CUdevice_attribute;
         let major = self.device.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
         let minor = self.device.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
@@ -176,7 +177,7 @@ impl CudaMiner {
     }
 
     /// Get last kernel duration in milliseconds (0 if none yet)
-    pub(crate) fn last_kernel_ms(&self) -> u64 {
+    pub fn last_kernel_ms(&self) -> u64 {
         self.last_kernel_ms.load(Ordering::Relaxed)
     }
 }
