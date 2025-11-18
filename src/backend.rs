@@ -32,7 +32,7 @@ pub trait MiningBackend: Send + Sync {
     ) -> Result<Option<(u32, [u8; 32])>>;
     
     /// Get the algorithm name (e.g., "qhash", "sha256d")
-    fn algorithm_name(&self) -> &str;
+    fn _algorithm_name(&self) -> &str;
     
     /// Get device name (e.g., "NVIDIA GeForce GTX 1660 SUPER")
     fn device_name(&self) -> Result<String>;

@@ -1,10 +1,8 @@
 /// Mining algorithm trait and implementations
 pub mod qhash;
 
-pub use qhash::QHash;
-
 /// Trait for mining hash algorithms
-pub trait HashAlgorithm {
+pub trait _HashAlgorithm {
     /// Get the algorithm name
     fn name(&self) -> &str;
     

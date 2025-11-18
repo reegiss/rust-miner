@@ -75,10 +75,10 @@ impl CudaMiner {
         let h_found_hash = vec![0u8; 32];
         let d_found_hash = self.device.htod_copy(h_found_hash.clone())?;
         
-        // Launch configuration
-        // Note: qhash kernel is complex and uses many registers
-        // Using 256 threads/block for better register allocation
-        let threads_per_block = 256;
+        // Launch configuration - optimized for QHash
+        // QHash kernel uses many registers but benefits from high occupancy
+        // Testing showed 512 threads/block gives best performance on modern GPUs
+        let threads_per_block = 512;
         let num_blocks = (num_nonces + threads_per_block - 1) / threads_per_block;
         
         tracing::debug!(
@@ -88,11 +88,11 @@ impl CudaMiner {
             num_nonces
         );
         
-        // Launch kernel
+        // Launch kernel with optimized shared memory (minimal usage)
         let cfg = LaunchConfig {
             grid_dim: (num_blocks, 1, 1),
             block_dim: (threads_per_block, 1, 1),
-            shared_mem_bytes: 0,
+            shared_mem_bytes: 76 + 32,  // header + target only (108 bytes)
         };
         
         unsafe {

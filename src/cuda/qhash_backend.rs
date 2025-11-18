@@ -79,7 +79,7 @@ impl MiningBackend for QHashCudaBackend {
         self.miner.mine_job(&header_76, ntime, &target, start_nonce, num_nonces)
     }
     
-    fn algorithm_name(&self) -> &str {
+    fn _algorithm_name(&self) -> &str {
         "qhash"
     }
     

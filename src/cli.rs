@@ -38,9 +38,9 @@ pub struct Args {
     #[arg(short, long)]
     pub debug: bool,
 
-    /// Disable colored output
+    /// Enable benchmark mode (no pool connection required)
     #[arg(long)]
-    pub no_color: bool,
+    pub benchmark: bool,
 }
 
 pub fn display_banner() {

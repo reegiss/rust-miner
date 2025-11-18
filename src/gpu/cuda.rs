@@ -56,7 +56,7 @@ pub fn detect_cuda_devices() -> GpuResult<Vec<GpuDevice>> {
         
         // Get total memory (cudarc doesn't expose total_mem directly, get from ordinal)
         let total_memory = match cudarc::driver::result::mem_get_info() {
-            Ok((free, total)) => total,
+            Ok((_free, total)) => total,
             Err(_) => 6_000_000_000, // Fallback
         };
         

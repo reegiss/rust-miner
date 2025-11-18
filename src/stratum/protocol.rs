@@ -42,7 +42,7 @@ pub enum StratumMethod {
     /// mining.set_difficulty (from server)
     SetDifficulty,
     /// mining.set_extranonce (from server)
-    SetExtranonce,
+    _SetExtranonce,
 }
 
 impl StratumMethod {
@@ -53,7 +53,7 @@ impl StratumMethod {
             Self::Submit => "mining.submit",
             Self::Notify => "mining.notify",
             Self::SetDifficulty => "mining.set_difficulty",
-            Self::SetExtranonce => "mining.set_extranonce",
+            Self::_SetExtranonce => "mining.set_extranonce",
         }
     }
 }
@@ -148,7 +148,7 @@ impl StratumResponse {
         self.error.is_some()
     }
     
-    pub fn is_notification(&self) -> bool {
+    pub fn _is_notification(&self) -> bool {
         self.method.is_some() && self.id.is_none()
     }
     
@@ -186,6 +186,9 @@ pub struct StratumJob {
     
     /// Clean jobs flag (true = discard old jobs)
     pub clean_jobs: bool,
+    
+    /// Calculated difficulty
+    pub difficulty: f64,
 }
 
 impl StratumJob {
@@ -243,6 +246,18 @@ impl StratumJob {
             .as_bool()
             .ok_or_else(|| StratumError::InvalidResponse("clean_jobs not a boolean".to_string()))?;
         
+        // Calculate difficulty from nbits (simplified - for Qubitcoin this is usually around 20-30)
+        let difficulty = if let Ok(nbits_val) = u32::from_str_radix(&nbits, 16) {
+            // Very rough approximation: higher nbits = lower difficulty
+            // This is not accurate but gives reasonable values for display
+            let exponent = (nbits_val >> 24) as f64;
+            let mantissa = (nbits_val & 0x00FFFFFF) as f64;
+            // Simplified calculation - actual difficulty would be much more complex
+            (0xFFFF as f64 / mantissa) * 2.0f64.powf(32.0 - exponent)
+        } else {
+            21.48 // fallback to a typical Qubitcoin difficulty
+        };
+        
         Ok(Self {
             job_id,
             prevhash,
@@ -253,6 +268,7 @@ impl StratumJob {
             nbits,
             ntime,
             clean_jobs,
+            difficulty,
         })
     }
 }

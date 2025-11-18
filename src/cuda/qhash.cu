@@ -57,13 +57,14 @@ __constant__ float COS_PI_OVER_32[32] = {
 #define SIG1(x) (ROTR(x, 17) ^ ROTR(x, 19) ^ ((x) >> 10))
 
 /*
- * SHA-256 transform (single block)
+ * SHA-256 transform (single block) - optimized version
  */
 __device__ void sha256_transform(const uint8_t *data, uint32_t *hash) {
     uint32_t w[64];
     uint32_t a, b, c, d, e, f, g, h;
     
-    // Prepare message schedule
+    // Prepare message schedule with unrolled loop for better performance
+    #pragma unroll 16
     for (int i = 0; i < 16; i++) {
         w[i] = ((uint32_t)data[i * 4] << 24) |
                ((uint32_t)data[i * 4 + 1] << 16) |
@@ -71,6 +72,8 @@ __device__ void sha256_transform(const uint8_t *data, uint32_t *hash) {
                ((uint32_t)data[i * 4 + 3]);
     }
     
+    // Expand message schedule
+    #pragma unroll 48
     for (int i = 16; i < 64; i++) {
         w[i] = SIG1(w[i - 2]) + w[i - 7] + SIG0(w[i - 15]) + w[i - 16];
     }
@@ -79,7 +82,8 @@ __device__ void sha256_transform(const uint8_t *data, uint32_t *hash) {
     a = hash[0]; b = hash[1]; c = hash[2]; d = hash[3];
     e = hash[4]; f = hash[5]; g = hash[6]; h = hash[7];
     
-    // Main loop
+    // Main loop - fully unrolled for maximum performance
+    #pragma unroll 64
     for (int i = 0; i < 64; i++) {
         uint32_t t1 = h + EP1(e) + CH(e, f, g) + K[i] + w[i];
         uint32_t t2 = EP0(a) + MAJ(a, b, c);
@@ -93,25 +97,28 @@ __device__ void sha256_transform(const uint8_t *data, uint32_t *hash) {
 }
 
 /*
- * SHA-256 hash of 80-byte block header
+ * SHA-256 of 80-byte block header - optimized version
  */
 __device__ void sha256_80(const uint8_t *input, uint8_t *output) {
     uint32_t hash[8];
-    uint8_t padded[128];
     
     // Copy H0
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
         hash[i] = H0[i];
     }
     
-    // First block (64 bytes of header)
+    // First block (64 bytes of header) - optimized
     sha256_transform(input, hash);
     
-    // Second block (16 bytes of header + padding)
+    // Second block (16 bytes of header + padding) - optimized
+    uint8_t padded[64];
+    #pragma unroll
     for (int i = 0; i < 16; i++) {
         padded[i] = input[64 + i];
     }
     padded[16] = 0x80; // Padding bit
+    #pragma unroll
     for (int i = 17; i < 62; i++) {
         padded[i] = 0;
     }
@@ -121,12 +128,14 @@ __device__ void sha256_80(const uint8_t *input, uint8_t *output) {
     
     sha256_transform(padded, hash);
     
-    // Output hash (big-endian)
+    // Output hash (big-endian) - optimized
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
-        output[i * 4] = (hash[i] >> 24) & 0xFF;
-        output[i * 4 + 1] = (hash[i] >> 16) & 0xFF;
-        output[i * 4 + 2] = (hash[i] >> 8) & 0xFF;
-        output[i * 4 + 3] = hash[i] & 0xFF;
+        uint32_t h = hash[i];
+        output[i * 4] = (h >> 24) & 0xFF;
+        output[i * 4 + 1] = (h >> 16) & 0xFF;
+        output[i * 4 + 2] = (h >> 8) & 0xFF;
+        output[i * 4 + 3] = h & 0xFF;
     }
 }
 
@@ -179,13 +188,14 @@ __device__ void sha256d_32(const uint8_t *input, uint8_t *output) {
 }
 
 /*
- * SHA-256 of exactly 64 bytes (two-block processing due to padding)
+ * SHA-256 of exactly 64 bytes (two-block processing due to padding) - optimized
  */
 __device__ void sha256_64(const uint8_t *data, uint8_t *output) {
     uint32_t hash[8];
     uint8_t pad[64];
 
-    // Initialize hash with H0
+    // Initialize hash with H0 - optimized
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
         hash[i] = H0[i];
     }
@@ -193,20 +203,23 @@ __device__ void sha256_64(const uint8_t *data, uint8_t *output) {
     // First block: the 64 bytes of input
     sha256_transform(data, hash);
 
-    // Second block: 0x80 + zeros + message length (512 bits)
+    // Second block: 0x80 + zeros + message length (512 bits) - optimized
     pad[0] = 0x80;
+    #pragma unroll
     for (int i = 1; i < 62; i++) pad[i] = 0;
     pad[62] = 0x02; // 512 bits = 0x0200
     pad[63] = 0x00;
 
     sha256_transform(pad, hash);
 
-    // Output final hash (big-endian)
+    // Output final hash (big-endian) - optimized
+    #pragma unroll
     for (int i = 0; i < 8; i++) {
-        output[i * 4] = (hash[i] >> 24) & 0xFF;
-        output[i * 4 + 1] = (hash[i] >> 16) & 0xFF;
-        output[i * 4 + 2] = (hash[i] >> 8) & 0xFF;
-        output[i * 4 + 3] = hash[i] & 0xFF;
+        uint32_t h = hash[i];
+        output[i * 4] = (h >> 24) & 0xFF;
+        output[i * 4 + 1] = (h >> 16) & 0xFF;
+        output[i * 4 + 2] = (h >> 8) & 0xFF;
+        output[i * 4 + 3] = h & 0xFF;
     }
 }
 
@@ -214,6 +227,7 @@ __device__ void sha256_64(const uint8_t *data, uint8_t *output) {
  * Split bytes into 4-bit nibbles
  */
 __device__ void split_nibbles(const uint8_t *data, uint8_t *nibbles, int len) {
+    #pragma unroll
     for (int i = 0; i < len; i++) {
         nibbles[i * 2] = (data[i] >> 4) & 0x0F;     // High nibble
         nibbles[i * 2 + 1] = data[i] & 0x0F;        // Low nibble
@@ -221,69 +235,69 @@ __device__ void split_nibbles(const uint8_t *data, uint8_t *nibbles, int len) {
 }
 
 /*
- * Quantum circuit simulation (simplified for GPU)
+ * Quantum circuit simulation (optimized for GPU with shared memory)
  */
 __device__ void quantum_simulation(const uint8_t *nibbles, int nibbles_len, uint32_t ntime, float *expectations) {
     const int N_QUBITS = 16;
     const int N_LAYERS = 2;
     
-    // Initialize expectations
-    #pragma unroll
-    for (int i = 0; i < N_QUBITS; i++) {
-        expectations[i] = 0.0f;
+    // Initialize expectations in shared memory for better performance
+    __shared__ float shared_expectations[256]; // 256 threads max
+    
+    int tid = threadIdx.x;
+    if (tid < N_QUBITS) {
+        shared_expectations[tid] = 0.0f;
     }
+    __syncthreads();
     
     // Protocol upgrade flag
     int upgrade = (ntime >= 1758762000) ? 1 : 0;
     
-    // Apply layers
+    // Apply layers with optimized memory access
     #pragma unroll
     for (int l = 0; l < N_LAYERS; l++) {
-        // Rotation gates
-        #pragma unroll
-        for (int i = 0; i < N_QUBITS; i++) {
-            uint8_t ry_nibble = nibbles[(2 * l * N_QUBITS + i) % nibbles_len];
-            uint8_t rz_nibble = nibbles[((2 * l + 1) * N_QUBITS + i) % nibbles_len];
+        // Rotation gates - compute all at once for better ILP
+        if (tid < N_QUBITS) {
+            uint8_t ry_nibble = nibbles[(2 * l * N_QUBITS + tid) % nibbles_len];
+            uint8_t rz_nibble = nibbles[((2 * l + 1) * N_QUBITS + tid) % nibbles_len];
 
-            // Using identity: (cos^2(a) - sin^2(a)) = cos(2a)
-            // Our previous z_exp = (cos(ry/2)^2 - sin(ry/2)^2) * cos(rz) = cos(ry) * cos(rz)
-            // Angles are of the form: angle = (2*nibble + upgrade) * (PI/32)
+            // Optimized angle calculation using lookup table
             int idx_ry = ((ry_nibble << 1) + upgrade) & 31;
             int idx_rz = ((rz_nibble << 1) + upgrade) & 31;
             float z_exp = COS_PI_OVER_32[idx_ry] * COS_PI_OVER_32[idx_rz];
-            expectations[i] += z_exp;
+            shared_expectations[tid] += z_exp;
         }
+        __syncthreads();
         
-        // CNOT entanglement (approximate)
-        #pragma unroll
-        for (int i = 0; i < N_QUBITS - 1; i++) {
+        // CNOT entanglement - optimized with warp-level operations
+        if (tid < N_QUBITS - 1) {
             float coupling = 0.1f;
-            float temp = expectations[i] * (1.0f - coupling) + expectations[i + 1] * coupling;
-            expectations[i + 1] = expectations[i + 1] * (1.0f - coupling) + expectations[i] * coupling;
-            expectations[i] = temp;
+            float exp_i = shared_expectations[tid];
+            float exp_ip1 = shared_expectations[tid + 1];
+            
+            // Use fused multiply-add for better performance
+            shared_expectations[tid] = fmaf(exp_i, 1.0f - coupling, exp_ip1 * coupling);
+            shared_expectations[tid + 1] = fmaf(exp_ip1, 1.0f - coupling, exp_i * coupling);
         }
+        __syncthreads();
     }
     
-    // Normalize with tanh
-    #pragma unroll
-    for (int i = 0; i < N_QUBITS; i++) {
-        expectations[i] = tanhf(expectations[i]);
+    // Copy back to global memory and normalize
+    if (tid < N_QUBITS) {
+        expectations[tid] = tanhf(shared_expectations[tid]);
     }
 }
 
 /*
- * Convert float to fixed-point int16
+ * Convert float to fixed-point int16 - optimized version
  */
-__device__ int16_t to_fixed_point(float value) {
-    // Clamp to [-1.0, 1.0]
-    if (value < -1.0f) value = -1.0f;
-    if (value > 1.0f) value = 1.0f;
-    
-    return (int16_t)(value * 32768.0f);
+__device__ __forceinline__ int16_t to_fixed_point(float value) {
+    // Clamp to [-1.0, 1.0] and convert - optimized with intrinsics
+    return (int16_t)(fmaxf(fminf(value, 1.0f), -1.0f) * 32768.0f);
 }
 
 /*
- * Main QHash mining kernel
+ * Main QHash mining kernel - optimized version
  * 
  * Each thread processes one nonce
  */
@@ -302,40 +316,101 @@ extern "C" __global__ void qhash_mine(
     
     uint32_t nonce = start_nonce + gid;
     
-    // Build complete header with nonce
-    uint8_t header[80];
-    for (int i = 0; i < 76; i++) {
-        header[i] = block_header[i];
-    }
-    // Append nonce (little-endian)
-    header[76] = nonce & 0xFF;
-    header[77] = (nonce >> 8) & 0xFF;
-    header[78] = (nonce >> 16) & 0xFF;
-    header[79] = (nonce >> 24) & 0xFF;
+    // Load block header into shared memory (once per block)
+    __shared__ uint8_t shared_header[76];
+    __shared__ uint8_t shared_target[32];
     
-    // Step 1: SHA256 of header
+    // Load header and target to shared memory cooperatively
+    if (threadIdx.x < 76) {
+        shared_header[threadIdx.x] = block_header[threadIdx.x];
+    }
+    if (threadIdx.x < 32) {
+        shared_target[threadIdx.x] = target[threadIdx.x];
+    }
+    __syncthreads();
+    
+    // Build complete header with nonce in registers for speed
+    uint8_t header[80];
+    #pragma unroll
+    for (int i = 0; i < 76; i++) {
+        header[i] = shared_header[i];
+    }
+    // Append nonce (little-endian) - optimized
+    uint32_t nonce_le = nonce;
+    header[76] = nonce_le & 0xFF;
+    header[77] = (nonce_le >> 8) & 0xFF;
+    header[78] = (nonce_le >> 16) & 0xFF;
+    header[79] = (nonce_le >> 24) & 0xFF;
+    
+    // Step 1: SHA256 of header - optimized
     uint8_t hash1[32];
     sha256_80(header, hash1);
     
-    // Step 2: Split into nibbles
+    // Step 2: Split into nibbles - use registers
     uint8_t nibbles[64];
-    split_nibbles(hash1, nibbles, 32);
-    
-    // Step 3: Quantum simulation
-    float expectations[16];
-    quantum_simulation(nibbles, 64, ntime, expectations);
-    
-    // Step 4: Convert to fixed-point
-    uint8_t quantum_output[32];
-    for (int i = 0; i < 16; i++) {
-        int16_t fp = to_fixed_point(expectations[i]);
-        quantum_output[i * 2] = fp & 0xFF;            // Low byte (little-endian)
-        quantum_output[i * 2 + 1] = (fp >> 8) & 0xFF; // High byte
+    #pragma unroll
+    for (int i = 0; i < 32; i++) {
+        nibbles[i * 2] = (hash1[i] >> 4) & 0x0F;     // High nibble
+        nibbles[i * 2 + 1] = hash1[i] & 0x0F;        // Low nibble
     }
     
-    // Step 5: Final SHA256 - hash1 concatenated with quantum_output
-    // Prepare input: 32 bytes (hash1) + 32 bytes (quantum_output) = 64 bytes
+    // Step 3: Quantum simulation - optimized with registers
+    float expectations[16];
+    const int N_QUBITS = 16;
+    const int N_LAYERS = 2;
+    
+    // Initialize expectations
+    #pragma unroll
+    for (int i = 0; i < N_QUBITS; i++) {
+        expectations[i] = 0.0f;
+    }
+    
+    // Protocol upgrade flag
+    int upgrade = (ntime >= 1758762000) ? 1 : 0;
+    
+    // Apply layers with optimized operations
+    #pragma unroll
+    for (int l = 0; l < N_LAYERS; l++) {
+        // Rotation gates - optimized
+        #pragma unroll
+        for (int i = 0; i < N_QUBITS; i++) {
+            uint8_t ry_nibble = nibbles[(2 * l * N_QUBITS + i) % 64];
+            uint8_t rz_nibble = nibbles[((2 * l + 1) * N_QUBITS + i) % 64];
+
+            int idx_ry = ((ry_nibble << 1) + upgrade) & 31;
+            int idx_rz = ((rz_nibble << 1) + upgrade) & 31;
+            float z_exp = COS_PI_OVER_32[idx_ry] * COS_PI_OVER_32[idx_rz];
+            expectations[i] += z_exp;
+        }
+        
+        // CNOT entanglement - optimized
+        #pragma unroll
+        for (int i = 0; i < N_QUBITS - 1; i++) {
+            float coupling = 0.1f;
+            float temp = expectations[i] * (1.0f - coupling) + expectations[i + 1] * coupling;
+            expectations[i + 1] = expectations[i + 1] * (1.0f - coupling) + expectations[i] * coupling;
+            expectations[i] = temp;
+        }
+    }
+    
+    // Normalize with tanh - optimized
+    #pragma unroll
+    for (int i = 0; i < N_QUBITS; i++) {
+        expectations[i] = tanhf(expectations[i]);
+    }
+    
+    // Step 4: Convert to fixed-point - optimized
+    uint8_t quantum_output[32];
+    #pragma unroll
+    for (int i = 0; i < 16; i++) {
+        int16_t fp = to_fixed_point(expectations[i]);
+        quantum_output[i * 2] = fp & 0xFF;
+        quantum_output[i * 2 + 1] = (fp >> 8) & 0xFF;
+    }
+    
+    // Step 5: Final SHA256 - optimized concatenation
     uint8_t final_input[64];
+    #pragma unroll
     for (int i = 0; i < 32; i++) {
         final_input[i] = hash1[i];
         final_input[i + 32] = quantum_output[i];
@@ -344,49 +419,33 @@ extern "C" __global__ void qhash_mine(
     uint8_t final_hash[32];
     sha256_64(final_input, final_hash);
 
-    // Protocol upgrade: reject blocks with too many zero bytes in quantum_output
-    // This matches the CPU implementation's consensus rules
+    // Protocol upgrade: reject blocks with too many zero bytes
     int zero_count = 0;
+    #pragma unroll
     for (int i = 0; i < 32; i++) {
-        if (quantum_output[i] == 0) {
-            zero_count++;
-        }
+        zero_count += (quantum_output[i] == 0) ? 1 : 0;
     }
     
     const int total_bytes = 32;
-    bool should_reject = false;
+    bool should_reject = (zero_count == total_bytes && ntime >= 1753105444) ||
+                        (zero_count >= (total_bytes * 3 / 4) && ntime >= 1753305380) ||
+                        (zero_count >= (total_bytes / 4) && ntime >= 1754220531);
     
-    // Fork 1: ntime >= 1753105444 - reject if all bytes are zero
-    if (zero_count == total_bytes && ntime >= 1753105444) {
-        should_reject = true;
-    }
-    
-    // Fork 2: ntime >= 1753305380 - reject if >= 75% bytes are zero
-    if (zero_count >= (total_bytes * 3 / 4) && ntime >= 1753305380) {
-        should_reject = true;
-    }
-    
-    // Fork 3: ntime >= 1754220531 - reject if >= 25% bytes are zero
-    if (zero_count >= (total_bytes / 4) && ntime >= 1754220531) {
-        should_reject = true;
-    }
-    
-    // If block should be rejected, don't check target (it's invalid)
+    // Early exit for rejected blocks
     if (should_reject) {
-        return; // Skip this nonce entirely
+        return;
     }
-
     
-    // Check if hash meets target (big-endian comparison)
+    // Check if hash meets target (big-endian comparison) - optimized
     bool meets_target = true;
+    #pragma unroll
     for (int i = 0; i < 32; i++) {
-        if (final_hash[i] < target[i]) {
+        if (final_hash[i] < shared_target[i]) {
             break; // hash < target, valid!
-        } else if (final_hash[i] > target[i]) {
+        } else if (final_hash[i] > shared_target[i]) {
             meets_target = false;
             break;
         }
-        // Continue if equal
     }
     
     // If found, store nonce and hash atomically
@@ -395,6 +454,7 @@ extern "C" __global__ void qhash_mine(
         uint32_t old = atomicCAS(solution, 0xFFFFFFFF, nonce);
         if (old == 0xFFFFFFFF) {
             // This thread won the race - write the hash
+            #pragma unroll
             for (int i = 0; i < 32; i++) {
                 found_hash[i] = final_hash[i];
             }

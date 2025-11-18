@@ -21,6 +21,98 @@ use std::time::Duration;
 
 // CPU fallback removed by design. This miner requires a compatible GPU.
 
+/// Run simple benchmark mode (no pool connection required)
+async fn run_simple_benchmark() -> Result<()> {
+    println!("\n{}", "=== Simple Benchmark Mode ===".cyan().bold());
+    println!("Testing QHash performance for 30 seconds...");
+    
+    // Create backend
+    let backend = match create_backend("qhash") {
+        Ok(backend) => backend,
+        Err(e) => {
+            eprintln!("{}", format!("Failed to create backend: {}", e).red());
+            return Err(e);
+        }
+    };
+    
+    // Create a dummy job for benchmarking
+    let dummy_job = stratum::StratumJob {
+        job_id: "benchmark".to_string(),
+        prevhash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
+        coinb1: "01000000010000000000000000000000000000000000000000000000000000000000000000ffffffff0f5104".to_string(),
+        coinb2: "ffffffff0100f2052a010000001976a9140000000000000000000000000000000000000088ac00000000".to_string(),
+        merkle_branch: vec![],
+        version: "20000000".to_string(),
+        nbits: "1d00ffff".to_string(),
+        ntime: "66666666".to_string(),
+        clean_jobs: true,
+        difficulty: 1.0,
+    };
+    
+    let extranonce1 = "00000000"; // dummy hex string
+    let extranonce2 = vec![0u8; 4]; // dummy bytes
+    
+    println!("Running benchmark...");
+    
+    let start_time = std::time::Instant::now();
+    let mut total_hashes = 0u64;
+    let mut current_nonce = 0u32;
+    
+    while start_time.elapsed() < Duration::from_secs(30) {
+        let chunk_size = 10_000_000u32; // 10M nonces per batch
+        
+        let backend_clone = backend.clone();
+        let job_clone = dummy_job.clone();
+        let en1_clone = extranonce1.to_string();
+        let en2_clone = extranonce2.clone();
+        
+        let result = tokio::task::spawn_blocking(move || {
+            backend_clone.mine_job(
+                &job_clone,
+                &en1_clone,
+                &en2_clone,
+                current_nonce,
+                chunk_size,
+            )
+        }).await;
+        
+        match result {
+            Ok(Ok(_)) => {
+                total_hashes += chunk_size as u64;
+            }
+            Ok(Err(e)) => {
+                eprintln!("Benchmark error: {}", e);
+                break;
+            }
+            Err(e) => {
+                eprintln!("Task error: {}", e);
+                break;
+            }
+        }
+        
+        current_nonce = current_nonce.wrapping_add(chunk_size);
+        
+        // Progress update every 5 seconds
+        let elapsed = start_time.elapsed().as_secs_f64();
+        if (elapsed as u32) % 5 == 0 && elapsed > 0.0 {
+            let hashrate = total_hashes as f64 / elapsed;
+            println!("Progress: {:.1}s - {:.2} MH/s", elapsed, hashrate / 1_000_000.0);
+        }
+    }
+    
+    let elapsed = start_time.elapsed().as_secs_f64();
+    let hashrate = total_hashes as f64 / elapsed;
+    
+    println!("\n{}", "=== Benchmark Results ===".green().bold());
+    println!("Algorithm: QHash");
+    println!("Duration: {:.2} seconds", elapsed);
+    println!("Total Hashes: {}", total_hashes);
+    println!("Hashrate: {:.2} MH/s", hashrate / 1_000_000.0);
+    println!("Hashrate: {:.2} H/s", hashrate);
+    
+    Ok(())
+}
+
 /// Create mining backend based on algorithm
 fn create_backend(algo: &str) -> Result<std::sync::Arc<dyn MiningBackend>> {
     match algo.to_lowercase().as_str() {
@@ -345,7 +437,7 @@ async fn main() -> Result<()> {
                                         }
 
                                         // Compute average of samples if available, otherwise use cumulative rate
-                                        let recent_avg = if !hr_window.is_empty() {
+                                        let _recent_avg = if !hr_window.is_empty() {
                                             hr_window.iter().copied().sum::<f64>() / hr_window.len() as f64
                                         } else {
                                             hashrate
@@ -406,8 +498,15 @@ async fn main() -> Result<()> {
                             ).await {
                                 Ok(true) => {
                                     stats.shares_accepted += 1;
-                                    println!("   {} {}", "✅ Share accepted!".green().bold(), 
-                                        format!("({}/{})", stats.shares_accepted, stats.shares_found).dimmed());
+                                    // WildRig-style share accepted log
+                                    println!("[{}] accepted ({}/{})       diff {:.2}G    GPU#{}   ({:.0} ms)",
+                                        chrono::Local::now().format("%H:%M:%S"),
+                                        stats.shares_accepted,
+                                        stats.shares_rejected,
+                                        job.difficulty / 1_000_000_000.0, // Convert to G
+                                        0, // GPU index
+                                        elapsed.as_millis()
+                                    );
                                 }
                                 Ok(false) => {
                                     stats.shares_rejected += 1;
@@ -535,20 +634,45 @@ fn print_wildrig_stats(backend: &std::sync::Arc<dyn MiningBackend>, hr_history: 
     let gstat = get_gpu_stats(idx).unwrap_or((None, None, None, None, None));
 
     let mut buf = String::new();
-    let mut buf = String::new();
-    // Compact single-line format
-    writeln!(buf, "[{}] GPU0: {:.2} MH/s | 10s: {:.2} | 60s: {:.2} | 15m: {:.2} | Temp: {}C | Power: {:.1}W | A:{} R:{} I:{}",
-        humantime::format_duration(now.elapsed()),
+    writeln!(buf, "--------------------------------------[Statistics]--------------------------------------").ok();
+    writeln!(buf, " ID Name                         Hashrate Temp  Fan  Power   Eff CClk MClk     A   R   I").ok();
+    writeln!(buf, "----------------------------------------------------------------------------------------").ok();
+    
+    // Calculate efficiency (MH/s per Watt)
+    let efficiency = if let Some(power) = gstat.2 {
+        if power > 0.0 {
+            (rate10 / 1_000_000.0) / power
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    
+    // Per-device row - WildRig style
+    writeln!(buf, " #{} {:26} {:9.2} MH/s  {}C  {}%  {:.1}W {:.3} {} {}     {}   {}   {}",
+        idx,
+        device_name,
         rate10 / 1_000_000.0,
-        rate10 / 1_000_000.0,
-        rate60 / 1_000_000.0,
-        rate15m / 1_000_000.0,
         gstat.0.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string()),
+        gstat.1.map(|f| f.to_string()).unwrap_or_else(|| "-".to_string()),
         gstat.2.unwrap_or(0.0),
+        efficiency,
+        gstat.3.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
+        gstat.4.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
         stats.shares_accepted,
-        stats.shares_rejected,
-        0
+        if stats.shares_rejected > 0 { stats.shares_rejected.to_string() } else { "-".to_string() },
+        "-"  // Ignored shares
     ).ok();
+    writeln!(buf, "----------------------------------------------------------------------------------------").ok();
+    writeln!(buf, " 10s: {:>28.2} MH/s Power: {:>7.1}W            Accepted: {:>8}",
+             rate10 / 1_000_000.0, gstat.2.unwrap_or(0.0), stats.shares_accepted).ok();
+    writeln!(buf, " 60s: {:>28.2} MH/s                             Rejected: {:>8}",
+             rate60 / 1_000_000.0, if stats.shares_rejected > 0 { stats.shares_rejected.to_string() } else { "-".to_string() }).ok();
+    writeln!(buf, " 15m: {:>28.2} MH/s                             Ignored: {:>9}",
+             if rate15m > 0.0 { rate15m / 1_000_000.0 } else { 0.0 }, "-").ok();
+    writeln!(buf, "[{}]----------------------------------------------------------[ver. {}]", 
+             humantime::format_duration(now.elapsed()), env!("CARGO_PKG_VERSION")).ok();
 
     println!("{}", buf);
 

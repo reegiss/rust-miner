@@ -21,7 +21,7 @@ pub struct StratumConfig {
     pub user_agent: String,
     
     /// Connection timeout in seconds
-    pub timeout_secs: u64,
+    pub _timeout_secs: u64,
 }
 
 impl StratumConfig {
@@ -31,7 +31,7 @@ impl StratumConfig {
             username,
             password,
             user_agent: format!("rust-miner/{}", env!("CARGO_PKG_VERSION")),
-            timeout_secs: 30,
+            _timeout_secs: 30,
         }
     }
 }
@@ -99,6 +99,7 @@ impl StratumClient {
     async fn start_reader(&self, reader: ReadHalf<TcpStream>) {
         let job_sender = self.job_sender.clone();
         let response_sender = self.response_sender.clone();
+        let pool_url = self.config.url.clone();
         
         tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
@@ -134,6 +135,24 @@ impl StratumClient {
                                             if let Some(params) = &response.params {
                                                 match StratumJob::from_params(params) {
                                                     Ok(job) => {
+                                                        // WildRig-style job notification
+                                                        println!("[{}] new job from {} diff {:.2}G/{:.2}P",
+                                                            chrono::Local::now().format("%H:%M:%S"),
+                                                            pool_url,
+                                                            job.difficulty / 1_000_000_000.0, // Convert to G
+                                                            job.difficulty / 1_000_000_000.0  // Same as network diff for now
+                                                        );
+                                                        
+                                                        // Block information
+                                                        if let Ok(block_height) = u32::from_str_radix(&job.ntime, 16) {
+                                                            println!("[{}] block: {}        job target: 0x{} 0x{}",
+                                                                chrono::Local::now().format("%H:%M:%S"),
+                                                                block_height,
+                                                                &job.nbits[..8], // First 8 chars of nbits
+                                                                &job.nbits[8..]  // Last 8 chars of nbits
+                                                            );
+                                                        }
+                                                        
                                                         tracing::info!(
                                                             "New job received: {} (clean={})",
                                                             job.job_id,
