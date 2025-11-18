@@ -241,8 +241,7 @@ async fn main() -> Result<()> {
                 let extranonce2 = stratum_client.create_extranonce2(extranonce2_counter).await;
                 extranonce2_counter = extranonce2_counter.wrapping_add(1);
                 
-                println!("   {} {}", "Extranonce1:".green(), extranonce1);
-                println!("   {} {}", "Extranonce2:".green(), hex::encode(&extranonce2));
+                // Extranonce values intentionally not printed to keep logs compact
                 println!("\n{}", "⛏️  Mining...".yellow().bold());
 
                 // Print WildRig-style stats at job start (best-effort)
