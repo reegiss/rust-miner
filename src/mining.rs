@@ -246,6 +246,9 @@ pub fn mine_job_gpu(
     num_nonces: u32,
     stats: &mut MiningStats,
 ) -> Result<Option<(u32, [u8; 32])>> {
+    // Note: This function blocks on GPU synchronize() which uses CPU spin-wait.
+    // To minimize CPU usage, caller should use large batches (100M+ nonces)
+    // so GPU works for several seconds per call.
     // Parse ntime for QHash
     let ntime = hex_to_u32_le(&job.ntime)?;
     

@@ -207,9 +207,32 @@ async fn main() -> Result<()> {
     let mut stats = MiningStats::new();
     let mut extranonce2_counter: u32 = 0;
     
+    // Ctrl+C handler with atomic flag
+    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+    
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        shutdown_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    
     // Main mining loop - wait for jobs
     let mut job_count = 0;
     loop {
+        // Check for shutdown
+        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+            println!("\n{}", "Shutting down miner...".yellow());
+            
+            // Final statistics
+            println!("\n{}", "=== Final Statistics ===".cyan().bold());
+            println!("   {} {}", "Total Hashes:".green(), stats.hashes);
+            println!("   {} {}", "Shares Found:".green(), stats.shares_found);
+            println!("   {} {}", "Shares Accepted:".green(), stats.shares_accepted);
+            println!("   {} {}", "Shares Rejected:".green(), stats.shares_rejected);
+            
+            break;
+        }
+        
         tokio::select! {
             Some(job) = stratum_client.get_job() => {
                 job_count += 1;
@@ -244,51 +267,85 @@ async fn main() -> Result<()> {
                 
                 // Choose mining method based on CUDA availability
                 #[cfg(feature = "cuda")]
-                let mining_result = if let Some(ref miner) = cuda_miner {
-                    // GPU Mining - process large batches
-                    let chunk_size = 10_000_000u32; // 10M nonces per GPU call
+                let mining_result = if let Some(miner) = cuda_miner.clone() {
+                    // GPU Mining with NON-BLOCKING polling (low CPU usage like wildrig-multi)
+                    let chunk_size = 10_000_000u32; // 10M nonces per call (~500ms GPU time)
                     let mut current_nonce = 0u32;
                     let mut found_share = None;
+                    let mut iterations = 0u32;
                     
                     'gpu_mining: loop {
-                        // Check for new job
-                        if stratum_client.has_pending_job().await {
+                        // Check for shutdown signal
+                        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                            break 'gpu_mining;
+                        }
+                        
+                        // Check for new job every 10 iterations
+                        if iterations % 10 == 0 && stratum_client.has_pending_job().await {
                             println!("   {} Switching to new job", "🔄".yellow());
                             break 'gpu_mining;
                         }
                         
-                        // Mine chunk on GPU
-                        match crate::mining::mine_job_gpu(
-                            miner,
-                            &job,
-                            &extranonce1,
-                            &extranonce2,
-                            current_nonce,
-                            chunk_size,
-                            &mut stats
-                        ) {
-                            Ok(Some((nonce, hash))) => {
+                        // Clone data for blocking thread
+                        let job_clone = job.clone();
+                        let extranonce1_clone = extranonce1.clone();
+                        let extranonce2_clone = extranonce2.clone();
+                        let miner_clone = miner.clone();
+                        let nonce_start = current_nonce; // Capture current value
+                        
+                        // Run GPU mining in blocking thread pool (doesn't block tokio runtime)
+                        let result = tokio::task::spawn_blocking(move || {
+                            let mut local_stats = MiningStats::new();
+                            crate::mining::mine_job_gpu(
+                                &miner_clone,
+                                &job_clone,
+                                &extranonce1_clone,
+                                &extranonce2_clone,
+                                nonce_start,
+                                chunk_size,
+                                &mut local_stats
+                            )
+                        }).await;
+                        
+                        match result {
+                            Ok(Ok(Some((nonce, hash)))) => {
+                                stats.hashes += chunk_size as u64;
+                                stats.shares_found += 1;
                                 found_share = Some((nonce, hash));
                                 break 'gpu_mining;
                             }
-                            Ok(None) => {
+                            Ok(Ok(None)) => {
                                 // Continue to next chunk
-                                let elapsed = start_time.elapsed();
-                                let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
-                                tracing::debug!(
-                                    "GPU mined {} hashes | {:.2} MH/s",
-                                    stats.hashes,
-                                    hashrate / 1_000_000.0
-                                );
+                                iterations += 1;
+                                stats.hashes += chunk_size as u64;
+                                
+                                // Print hashrate every 100 iterations
+                                if iterations % 100 == 0 {
+                                    let elapsed = start_time.elapsed();
+                                    if elapsed.as_secs() > 0 {
+                                        let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
+                                        tracing::info!(
+                                            "GPU: {} hashes | {:.2} MH/s",
+                                            stats.hashes,
+                                            hashrate / 1_000_000.0
+                                        );
+                                    }
+                                }
                                 
                                 current_nonce = current_nonce.wrapping_add(chunk_size);
                                 if current_nonce < chunk_size {
-                                    // Wrapped around, exhausted nonce space
+                                    // Wrapped around
                                     break 'gpu_mining;
                                 }
+                                // No artificial sleep - cuStreamQuery polling already includes 1ms sleep
+                            }
+                            Ok(Err(e)) => {
+                                eprintln!("   {} GPU mining error: {}", "❌".red(), e);
+                                tracing::error!("GPU error details: {:?}", e);
+                                break 'gpu_mining;
                             }
                             Err(e) => {
-                                eprintln!("   {} GPU mining error: {}", "❌".red(), e);
+                                eprintln!("   {} Task join error: {}", "❌".red(), e);
                                 break 'gpu_mining;
                             }
                         }
@@ -364,19 +421,6 @@ async fn main() -> Result<()> {
                     println!("   {} {}", "Total Hashes:".green(), stats.hashes);
                     println!("   {} {}", "Shares Found:".green(), stats.shares_found);
                 }
-            }
-            
-            _ = tokio::signal::ctrl_c() => {
-                println!("\n{}", "Shutting down miner...".yellow());
-                
-                // Final statistics
-                println!("\n{}", "=== Final Statistics ===".cyan().bold());
-                println!("   {} {}", "Total Hashes:".green(), stats.hashes);
-                println!("   {} {}", "Shares Found:".green(), stats.shares_found);
-                println!("   {} {}", "Shares Accepted:".green(), stats.shares_accepted);
-                println!("   {} {}", "Shares Rejected:".green(), stats.shares_rejected);
-                
-                break;
             }
         }
     }

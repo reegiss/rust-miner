@@ -4,8 +4,13 @@ use cudarc::driver::*;
 use cudarc::nvrtc::compile_ptx;
 use std::sync::Arc;
 
+// Import raw CUDA API for non-blocking polling
+use cudarc::driver::sys::lib;
+use cudarc::driver::sys::{CUstream, CUresult};
+
 const CUDA_KERNEL_SRC: &str = include_str!("qhash.cu");
 
+#[derive(Clone)]
 pub struct CudaMiner {
     device: Arc<CudaDevice>,
     func: CudaFunction,
@@ -59,6 +64,8 @@ impl CudaMiner {
         let d_solution = self.device.htod_copy(h_solution.clone())?;
         
         // Launch configuration
+        // Note: qhash kernel is complex and uses many registers
+        // Using 256 threads/block for better register allocation
         let threads_per_block = 256;
         let num_blocks = (num_nonces + threads_per_block - 1) / threads_per_block;
         
@@ -92,8 +99,29 @@ impl CudaMiner {
                 .map_err(|e| anyhow!("Kernel launch failed: {}", e))?;
         }
         
-        // Wait for completion
-        self.device.synchronize()?;
+        // Use NON-BLOCKING polling instead of synchronize() to reduce CPU usage
+        // This is how miners like wildrig-multi achieve <1% CPU usage
+        let stream = unsafe { *self.device.cu_stream() };
+        
+        loop {
+            let result = unsafe { lib().cuStreamQuery(stream) };
+            
+            match result {
+                CUresult::CUDA_SUCCESS => {
+                    // Kernel finished
+                    break;
+                }
+                CUresult::CUDA_ERROR_NOT_READY => {
+                    // Kernel still running - sleep to avoid busy-wait
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                _ => {
+                    // Error occurred
+                    return Err(anyhow!("Stream query failed: {:?}", result));
+                }
+            }
+        }
         
         // Copy result back
         let mut h_solution_result = vec![0u32];
