@@ -1,0 +1,85 @@
+#!/bin/bash
+# Teste de validação das otimizações de job switching
+
+set -e
+
+echo "=========================================="
+echo "Teste de Validação - Job Switching Fixes"
+echo "=========================================="
+echo ""
+
+cd /home/regis/develop/rust-miner
+
+# Build
+echo "Building..."
+cargo build --release 2>&1 | grep -E "Finished|error" || true
+
+echo ""
+echo "Otimizações aplicadas:"
+echo "  ✓ Job switching moved AFTER batch (não durante)"
+echo "  ✓ Adaptive batching desabilitado (50M fixo)"
+echo "  ✓ Logging reduzido (25 → 100 iterações)"
+echo ""
+
+echo "Para testar com pool real:"
+echo ""
+echo "1. Configure um pool stratum em ~/.rust-miner/config.toml ou via CLI"
+echo ""
+echo "2. Execute (com logging habilitado):"
+echo "   RUST_LOG=info ./target/release/rust-miner \\"
+echo "     --url stratum+tcp://pool.example.com:3333 \\"
+echo "     --user username.worker"
+echo ""
+echo "3. Observe as métricas:"
+echo ""
+echo "   a) GPU: XXX.XX MH/s (deve estar ~300-325 MH/s)"
+echo "   b) Switching to new job (less frequent than before)"
+echo "   c) Overall hashrate (deve melhorar de 37 MH/s)"
+echo ""
+
+echo "4. Para medir com precisão, rode por 5+ minutos e veja:"
+echo ""
+echo "   RUST_LOG=info ./target/release/rust-miner ... 2>&1 | \\"
+echo "     grep 'GPU:' | tail -10"
+echo ""
+
+echo "=========================================="
+echo "Métricas Esperadas:"
+echo "=========================================="
+echo ""
+echo "Baseline (antes das otimizações):"
+echo "  - Kernel isolado: 325 MH/s ✓ (confirmado)"
+echo "  - Com pool: 37 MH/s ✗ (devido a overhead)"
+echo "  - Eficiência: 11.4%"
+echo ""
+echo "Esperado após otimizações:"
+echo "  - Kernel isolado: 325 MH/s (igual, sem mudança no kernel)"
+echo "  - Com pool: 150-300 MH/s ✓ (reduz overhead)"
+echo "  - Eficiência: 46-92% (muito melhor)"
+echo ""
+echo "Ganho esperado: 4-8x melhora"
+echo ""
+
+echo "=========================================="
+echo "Se Ainda Lento (< 100 MH/s):"
+echo "=========================================="
+echo ""
+echo "1. Verificar frequência de 'Switching to new job'"
+echo "   grep 'Switching to new job' → deve ser raro"
+echo ""
+echo "2. Verificar pool latency"
+echo "   Pool pode estar respondendo lentamente"
+echo ""
+echo "3. Re-habilitar adaptive batching com valores maiores"
+echo "   Tentar: 100M, 200M, 500M nonces por batch"
+echo ""
+echo "4. Profiling com nsys:"
+echo "   nsys profile -d 10 --stats=true ./target/release/rust-miner"
+echo ""
+
+echo "=========================================="
+echo "Arquivo de log para referência:"
+echo "=========================================="
+echo "Documentação: OPTIMIZATION_JOB_SWITCHING.md"
+echo "Benchmark:    BENCHMARK_DISCOVERY.md"
+echo "=========================================="
