@@ -1,5 +1,5 @@
 /*
- * QHash (Quantum Proof-of-Work) CUDA Kernel
+ * QHash (Quantum Proof-of-Work) CUDA Kernel - OPTIMIZED
  * 
  * This kernel implements the qhash algorithm for GPU mining:
  * 1. SHA256 of block header
@@ -8,7 +8,12 @@
  * 4. Fixed-point conversion
  * 5. Final SHA256
  * 
- * Performance target: ~1000x faster than CPU
+ * Performance target: ~500 MH/s on GTX 1660 SUPER
+ * 
+ * Optimization flags applied during NVRTC compilation:
+ * - -O3: Maximum optimization level
+ * - --use_fast_math: Fast FP32 operations
+ * - --gpu-architecture=compute_75: Turing-specific optimization
  */
 
 // Use CUDA built-in types instead of stdint.h

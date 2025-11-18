@@ -5,7 +5,6 @@ pub use qhash_backend::QHashCudaBackend;
 
 use anyhow::{anyhow, Result};
 use cudarc::driver::*;
-use cudarc::nvrtc::compile_ptx;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,6 +13,35 @@ use cudarc::driver::sys::lib;
 use cudarc::driver::sys::CUresult;
 
 const CUDA_KERNEL_SRC: &str = include_str!("qhash.cu");
+
+/// Helper to compile CUDA kernel with aggressive optimizations
+/// 
+/// Ideally, we would use NVRTC with options:
+/// - `-O3`: Maximum optimization level
+/// - `--use_fast_math`: Enable fast FP32 math
+/// - `--gpu-architecture=compute_75`: Target Turing architecture explicitly
+/// 
+/// However, cudarc 0.11 doesn't expose option passing to compile_ptx.
+/// As a workaround, we:
+/// 1. Use compile_ptx with default options
+/// 2. Future: Wrap nvrtc_sys directly to support compile options
+/// 
+/// The kernel is already optimized with:
+/// - `#pragma unroll` directives in hot paths
+/// - Register allocation optimization via CUDA pragma comments
+/// - Fast math-friendly operations
+fn compile_optimized_kernel() -> Result<cudarc::nvrtc::Ptx> {
+    // Current limitation: cudarc 0.11's compile_ptx doesn't support options.
+    // Using default compilation which applies O2 level optimization.
+    // TODO: Move to nvrtc_sys to enable -O3, --use_fast_math flags.
+    
+    tracing::info!(
+        "Compiling CUDA kernel (compiled with O2; TODO: enable -O3, --use_fast_math, --gpu-architecture=compute_75)"
+    );
+    
+    cudarc::nvrtc::compile_ptx(CUDA_KERNEL_SRC)
+        .map_err(|e| anyhow!("Failed to compile CUDA kernel: {}", e))
+}
 
 /// Internal CUDA miner implementation (used by backends)
 /// Made public for benchmarking
@@ -30,12 +58,10 @@ impl CudaMiner {
         // Initialize CUDA device
         let device = CudaDevice::new(0)?;
         
-        tracing::info!("Compiling CUDA kernel for qhash...");
+        tracing::info!("Initializing CUDA miner...");
         
-        // Compile CUDA kernel to PTX
-        let ptx = compile_ptx(CUDA_KERNEL_SRC).map_err(|e| {
-            anyhow!("Failed to compile CUDA kernel: {}", e)
-        })?;
+        // Compile CUDA kernel to PTX with optimization
+        let ptx = compile_optimized_kernel()?;
         
         tracing::info!("Loading CUDA module...");
         
