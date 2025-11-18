@@ -535,25 +535,20 @@ fn print_wildrig_stats(backend: &std::sync::Arc<dyn MiningBackend>, hr_history: 
     let gstat = get_gpu_stats(idx).unwrap_or((None, None, None, None, None));
 
     let mut buf = String::new();
-    writeln!(buf, "--------------------------------------[Statistics]--------------------------------------").ok();
-    writeln!(buf, " ID Name                         Hashrate Temp  Fan  Power   Eff CClk MClk     A   R   I").ok();
-    writeln!(buf, "----------------------------------------------------------------------------------------").ok();
-    // Per-device row
-    writeln!(buf, " #{} {:26} {:9.2} MH/s  {}C  {}%  {:.1}W   -   {}   {}     -   -   - ",
-        idx,
-        format!("{}", device_name),
+    let mut buf = String::new();
+    // Compact single-line format
+    writeln!(buf, "[{}] GPU0: {:.2} MH/s | 10s: {:.2} | 60s: {:.2} | 15m: {:.2} | Temp: {}C | Power: {:.1}W | A:{} R:{} I:{}",
+        humantime::format_duration(now.elapsed()),
         rate10 / 1_000_000.0,
+        rate10 / 1_000_000.0,
+        rate60 / 1_000_000.0,
+        rate15m / 1_000_000.0,
         gstat.0.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string()),
-        gstat.1.map(|f| f.to_string()).unwrap_or_else(|| "-".to_string()),
         gstat.2.unwrap_or(0.0),
-        gstat.3.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
-        gstat.4.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string())
+        stats.shares_accepted,
+        stats.shares_rejected,
+        0
     ).ok();
-    writeln!(buf, "----------------------------------------------------------------------------------------").ok();
-    writeln!(buf, " 10s: {:>28.2} MH/s Power: {:>7.1}W            Accepted: {:8} ", rate10 / 1_000_000.0, gstat.2.unwrap_or(0.0), stats.shares_accepted).ok();
-    writeln!(buf, " 60s: {:>32.2} MH/s                             Rejected: {:8} ", rate60 / 1_000_000.0, stats.shares_rejected).ok();
-    writeln!(buf, " 15m: {:>31.2} MH/s                             Ignored:  {:8} ", rate15m / 1_000_000.0, 0).ok();
-    writeln!(buf, "[{}]----------------------------------------------------------[ver. {}]", humantime::format_duration(now.elapsed()), env!("CARGO_PKG_VERSION")).ok();
 
     println!("{}", buf);
 
