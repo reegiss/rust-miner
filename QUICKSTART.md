@@ -1,34 +1,32 @@
-# 🚀 Quick Start - rust-miner
+# 🚀 Quick Start - rust-miner (CUDA-only)
 
 ## TL;DR - Começar Agora
 
 ```bash
-# 1. Instalar tudo automaticamente
-cd /home/regis/develop/rust-miner
-bash setup.sh
-
-# 2. Após instalação do Rust, recarregar ambiente
+# 1) Instalar Rust (se necessário)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 
-# 3. Build com CUDA (recomendado para GTX 1660 SUPER)
-cargo build --release --features cuda
+# 2) Instalar CUDA Toolkit (12.x+)
+# (consulte SETUP.md para instruções da sua distro)
 
-# 4. Rodar
-./target/release/rust-miner
+# 3) Build
+cargo build --release
+
+# 4) Rodar com a sua pool
+./target/release/rust-miner \
+	--algo qhash \
+	--url qubitcoin.luckypool.io:8610 \
+	--user WALLET.WORKER \
+	--pass x
 ```
 
 ## Comandos Essenciais
 
 ### Build
 ```bash
-# CUDA (padrão, melhor performance)
-cargo build --release --features cuda
-
-# Todos os backends (auto-detect)
-cargo build --release --features all-backends
-
-# CPU apenas (desenvolvimento)
-cargo build --release --features cpu-only
+# CUDA (único backend)
+cargo build --release
 ```
 
 ### Testes
@@ -36,32 +34,26 @@ cargo build --release --features cpu-only
 # Testes básicos
 cargo test
 
-# Testes com CUDA
-cargo test --features cuda
-
 # Testes com output
 cargo test -- --nocapture
 ```
 
 ### Performance
 ```bash
-# Benchmarks CUDA
-cargo bench --features cuda
-
 # Profiling com flamegraph
 cargo flamegraph
-
+ 
 # Verificar otimizações
-cargo bloat --release --features cuda
+cargo bloat --release
 ```
 
 ### Desenvolvimento
 ```bash
-# Auto-rebuild on changes
-cargo watch -x 'build --features cuda'
+# Auto-rebuild
+cargo watch -x 'build'
 
 # Linter
-cargo clippy --features cuda
+cargo clippy
 
 # Formatação
 cargo fmt
@@ -71,32 +63,24 @@ cargo fmt
 
 ```
 rust-miner/
-├── .github/
-│   └── copilot-instructions.md    # ⭐ Guia completo para AI/Dev
 ├── src/
-│   ├── main.rs                    # Entry point
-│   ├── mining/                    # Mining engine
-│   │   ├── engine.rs
-│   │   ├── cuda.rs               # ⭐ CUDA backend
-│   │   ├── opencl.rs             # Fallback
-│   │   └── cpu.rs                # CPU fallback
-│   └── blockchain/                # Blockchain interface
-├── Cargo.toml                     # Dependencies + features
-├── SETUP.md                       # Setup detalhado
-├── setup.sh                       # Setup automatizado
-└── QUICKSTART.md                  # Este arquivo
+│   ├── main.rs             # Orquestração de mineração
+│   ├── backend.rs          # Trait MiningBackend (despacho dinâmico)
+│   ├── cuda/
+│   │   ├── mod.rs          # CUDA wrapper
+│   │   ├── qhash.cu        # Kernel QHash (CUDA)
+│   │   └── qhash_backend.rs# Backend QHash (trait impl)
+│   ├── mining.rs           # Utilitários (merkle, nbits, hex)
+│   ├── stratum/            # Cliente Stratum V1
+│   └── gpu/                # Detecção de GPU
+├── Cargo.toml
+├── SETUP.md
+└── QUICKSTART.md
 ```
 
-## Features do Cargo.toml
+## Algoritmo Suportado
 
-```toml
-[features]
-default = ["cuda"]                 # ⭐ CUDA por padrão
-cpu-only = []                      # CPU apenas
-cuda = ["dep:cudarc", ...]         # NVIDIA (PRIMARY)
-opencl = ["dep:ocl"]               # AMD/Intel (FALLBACK)
-all-backends = ["cuda", "opencl"]  # Todos
-```
+- qhash
 
 ## Verificar Instalação
 
@@ -109,21 +93,14 @@ cargo --version
 nvcc --version
 nvidia-smi
 
-# OpenCL (fallback)
-clinfo | head -20
-
 # Performance tools
 perf --version
 valgrind --version
 ```
 
-## Prioridade de Backends
+## Observações
 
-```
-1️⃣  CUDA     (GTX 1660 SUPER → ~26 MH/s Ethash)
-2️⃣  OpenCL   (Fallback → ~22 MH/s)
-3️⃣  CPU      (12 threads → ~0.5 MH/s)
-```
+- Apenas CUDA é suportado (GPU NVIDIA obrigatória)
 
 ## Links Importantes
 

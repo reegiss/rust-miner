@@ -3,19 +3,36 @@ use clap::Parser;
 use colored::*;
 
 mod algorithms;
+mod backend;
 mod cli;
-#[cfg(feature = "cuda")]
 mod cuda;
 mod gpu;
 mod mining;
 mod stratum;
 
+use backend::MiningBackend;
 use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus};
 use mining::MiningStats;
 use stratum::{StratumClient, StratumConfig};
 
 // CPU fallback removed by design. This miner requires a compatible GPU.
+
+/// Create mining backend based on algorithm
+fn create_backend(algo: &str) -> Result<std::sync::Arc<dyn MiningBackend>> {
+    match algo.to_lowercase().as_str() {
+        "qhash" => {
+            let backend = cuda::QHashCudaBackend::new()?;
+            Ok(std::sync::Arc::new(backend))
+        }
+        _ => {
+            anyhow::bail!(
+                "Unknown or unsupported algorithm: '{}'. Supported: qhash",
+                algo
+            );
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -108,6 +125,31 @@ async fn main() -> Result<()> {
     
     println!();
 
+    // Initialize mining backend (algorithm-specific) - BEFORE connecting to pool
+    let backend = {
+        tracing::info!("Initializing mining backend for algorithm: {}", args.algo);
+        match create_backend(&args.algo) {
+            Ok(backend) => {
+                let device_name = backend.device_name().unwrap_or_else(|_| "Unknown".to_string());
+                let (cc_major, cc_minor) = backend.compute_capability().unwrap_or((0, 0));
+                println!("\n{}", "=== GPU Mining Initialized ===".green().bold());
+                println!("   {}: {}", "Algorithm".cyan(), args.algo.yellow());
+                println!("   {}: {}", "Device".cyan(), device_name.green());
+                println!("   {}: {}.{}", "Compute Capability".cyan(), cc_major, cc_minor);
+                println!("   {}: Using CUDA kernel", "Mode".cyan());
+                backend
+            }
+            Err(e) => {
+                eprintln!("\n{}", "❌ Failed to initialize mining backend!".red().bold());
+                eprintln!("{}", format!("   Error: {}", e).red());
+                eprintln!("\n{}", format!("Algorithm '{}' is not supported or unavailable.", args.algo).yellow());
+                eprintln!("{}", "Supported algorithms:".yellow());
+                eprintln!("{}", "  • qhash (QBit/QubitCoin PoW)".green());
+                std::process::exit(1);
+            }
+        }
+    };
+
     // Initialize Stratum client
     tracing::info!("Initializing Stratum connection...");
     
@@ -137,38 +179,6 @@ async fn main() -> Result<()> {
     
     println!("\n{}", "=== Mining Status ===".cyan().bold());
     println!("{}", "Waiting for jobs from pool...".yellow());
-    
-    // Initialize CUDA miner (required for now). If it fails, exit with an error.
-    #[cfg(feature = "cuda")]
-    let cuda_miner = {
-        tracing::info!("Initializing CUDA miner...");
-        match crate::cuda::CudaMiner::new() {
-            Ok(miner) => {
-                let device_name = miner.device_name().unwrap_or_else(|_| "Unknown".to_string());
-                let (cc_major, cc_minor) = miner.compute_capability().unwrap_or((0, 0));
-                println!("\n{}", "=== GPU Mining Initialized ===".green().bold());
-                println!("   {} {}", "Device:".green(), device_name.bright_white());
-                println!("   {} {}.{}", "Compute Capability:".green(), cc_major, cc_minor);
-                println!("   {} Using CUDA kernel", "Mode:".green());
-                println!();
-                miner
-            }
-            Err(e) => {
-                eprintln!("\n{}", "❌ CUDA initialization failed!".red().bold());
-                eprintln!("   {}", format!("Error: {}", e).red());
-                eprintln!("\n{}", "This application requires a compatible NVIDIA GPU (CUDA).".yellow());
-                eprintln!("{}", "Build with --features cuda and ensure NVIDIA drivers and CUDA toolkit are installed.".yellow());
-                anyhow::bail!("CUDA initialization failed: {e}");
-            }
-        }
-    };
-    
-    #[cfg(not(feature = "cuda"))]
-    {
-        eprintln!("\n{}", "❌ No GPU backend compiled!".red().bold());
-        eprintln!("{}", "This build has no CUDA support. Compile with --features cuda.".yellow());
-        anyhow::bail!("No GPU backend compiled");
-    }
     
     // Mining statistics
     let mut stats = MiningStats::new();
@@ -232,10 +242,9 @@ async fn main() -> Result<()> {
                 
                 let start_time = std::time::Instant::now();
                 
-                // GPU mining (CUDA required at this stage)
-                #[cfg(feature = "cuda")]
+                // GPU mining via backend (CUDA-only implementation under the hood)
                 let mining_result = {
-                    let miner = cuda_miner.clone();
+                    let backend_clone = backend.clone();
                     // GPU Mining with adaptive batch sizing & polling
                     // Start with a larger batch to reduce host<->device churn
                     let mut chunk_size = 50_000_000u32; // initial 50M nonces (~>500ms target)
@@ -258,41 +267,38 @@ async fn main() -> Result<()> {
                         let nonce_start = current_nonce;
                         
                         // Run GPU mining in blocking thread (off main async reactor)
-                        let miner_clone = miner.clone();
+                        let backend_for_task = backend_clone.clone();
                         let job_clone = job.clone();
                         let extranonce1_clone = extranonce1.clone();
                         let extranonce2_clone = extranonce2.clone();
                         let result = tokio::task::spawn_blocking(move || {
-                            let mut local_stats = MiningStats::new();
-                            let mining_result = crate::mining::mine_job_gpu(
-                                &miner_clone,
+                            let mining_result = backend_for_task.mine_job(
                                 &job_clone,
                                 &extranonce1_clone,
                                 &extranonce2_clone,
                                 nonce_start,
                                 chunk_size,
-                                &mut local_stats
                             );
-                            // Return both result and stats
-                            (mining_result, local_stats)
+                            // Return result and num_nonces for stats
+                            (mining_result, chunk_size as u64)
                         }).await;
 
                         match result {
-                            Ok((Ok(Some((nonce, hash))), local_stats)) => {
+                            Ok((Ok(Some((nonce, hash))), num_hashes)) => {
                                 // Merge stats
-                                stats.hashes += local_stats.hashes;
+                                stats.hashes += num_hashes;
                                 stats.shares_found += 1;
                                 found_share = Some((nonce, hash));
                                 break 'gpu_mining;
                             }
-                            Ok((Ok(None), local_stats)) => {
+                            Ok((Ok(None), num_hashes)) => {
                                 // Merge stats
-                                stats.hashes += local_stats.hashes;
+                                stats.hashes += num_hashes;
                                 // Continue to next chunk
                                 iterations += 1;
                                 
                                 // Adaptive chunk sizing based on last kernel duration
-                                if let Some(ms) = Some(miner.last_kernel_ms()) {
+                                if let Some(ms) = Some(backend_clone.last_kernel_ms()) {
                                     if ms > 0 {
                                         // Target window ~700-900ms
                                         if ms < 400 && chunk_size < 150_000_000 {
@@ -315,7 +321,7 @@ async fn main() -> Result<()> {
                                             stats.hashes,
                                             hashrate / 1_000_000.0,
                                             chunk_size,
-                                            miner.last_kernel_ms()
+                                            backend_clone.last_kernel_ms()
                                         );
                                     }
                                 }
@@ -326,7 +332,7 @@ async fn main() -> Result<()> {
                                     break 'gpu_mining;
                                 }
                             }
-                            Ok((Err(e), _local_stats)) => {
+                            Ok((Err(e), _num_hashes)) => {
                                 eprintln!("   {} GPU mining error: {}", "❌".red(), e);
                                 tracing::error!("GPU error details: {:?}", e);
                                 break 'gpu_mining;
@@ -386,7 +392,6 @@ async fn main() -> Result<()> {
                         0.0
                     };
                     
-                    #[cfg(feature = "cuda")]
                     tracing::debug!("No share found | {:.2} MH/s (GPU)", hashrate / 1_000_000.0);
                 }
                 

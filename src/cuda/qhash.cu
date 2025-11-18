@@ -317,21 +317,6 @@ extern "C" __global__ void qhash_mine(
         quantum_output[i * 2 + 1] = (fp >> 8) & 0xFF; // High byte
     }
     
-    // Handle all-zero case
-    bool all_zero = true;
-    for (int i = 0; i < 32; i++) {
-        if (quantum_output[i] != 0) {
-            all_zero = false;
-            break;
-        }
-    }
-    
-    if (all_zero) {
-        for (int i = 0; i < 32; i++) {
-            quantum_output[i] = hash1[i];
-        }
-    }
-    
     // Step 5: Final SHA256 - hash1 concatenated with quantum_output
     // Prepare input: 32 bytes (hash1) + 32 bytes (quantum_output) = 64 bytes
     uint8_t final_input[64];
@@ -342,6 +327,38 @@ extern "C" __global__ void qhash_mine(
     
     uint8_t final_hash[32];
     sha256_64(final_input, final_hash);
+
+    // Protocol upgrade: reject blocks with too many zero bytes in quantum_output
+    // This matches the CPU implementation's consensus rules
+    int zero_count = 0;
+    for (int i = 0; i < 32; i++) {
+        if (quantum_output[i] == 0) {
+            zero_count++;
+        }
+    }
+    
+    const int total_bytes = 32;
+    bool should_reject = false;
+    
+    // Fork 1: ntime >= 1753105444 - reject if all bytes are zero
+    if (zero_count == total_bytes && ntime >= 1753105444) {
+        should_reject = true;
+    }
+    
+    // Fork 2: ntime >= 1753305380 - reject if >= 75% bytes are zero
+    if (zero_count >= (total_bytes * 3 / 4) && ntime >= 1753305380) {
+        should_reject = true;
+    }
+    
+    // Fork 3: ntime >= 1754220531 - reject if >= 25% bytes are zero
+    if (zero_count >= (total_bytes / 4) && ntime >= 1754220531) {
+        should_reject = true;
+    }
+    
+    // If block should be rejected, don't check target (it's invalid)
+    if (should_reject) {
+        return; // Skip this nonce entirely
+    }
 
     
     // Check if hash meets target (big-endian comparison)

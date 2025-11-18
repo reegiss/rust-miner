@@ -4,7 +4,7 @@
 
 **Pool:** qubitcoin.luckypool.io:8610  
 **Protocol:** Stratum V1  
-**Algorithm:** qhash (quantum Proof-of-Work)
+**Algorithm:** qhash (Quantum Proof-of-Work)
 
 ## Testing Commands
 
@@ -26,7 +26,7 @@ RUST_LOG=debug cargo run -- \
   --pass x
 ```
 
-### Release Build (Optimized CPU Performance)
+### Release Build (Optimized, CUDA)
 ```bash
 cargo build --release
 RUST_LOG=info ./target/release/rust-miner \
@@ -44,12 +44,12 @@ RUST_LOG=info ./target/release/rust-miner \
    - ✅ Receive extranonce1 and extranonce2_size
    - ✅ Authenticate with mining.authorize
 
-2. **Mining Phase:**
+2. **Mining Phase (GPU-only):**
    - ✅ Receive mining.notify jobs
    - ✅ Calculate merkle root
    - ✅ Build block header (80 bytes)
-   - ✅ Mine nonces 0-1,000,000
-   - ✅ Calculate qhash for each nonce
+   - ✅ Mine nonces in adaptive batches on GPU
+   - ✅ qhash kernel computes final hash
    - ✅ Check if hash < target
 
 3. **Share Submission (if found):**
@@ -95,10 +95,8 @@ Error: Authorization failed
 - Try different worker name (address.worker1)
 
 ### No Shares Found
-- Normal for high difficulty
-- CPU mining is slow (~100-500 H/s)
-- May take hours/days to find share
-- Consider GPU optimization
+- Normal for difficulty 5 on small runtimes
+- Let it run longer or reduce difficulty on pool if available
 
 ### Share Rejected
 - Hash doesn't meet difficulty (rare, should be checked before submit)
@@ -108,15 +106,9 @@ Error: Authorization failed
 
 ## Performance Notes
 
-### Current Performance (CPU)
-- **Algorithm:** QHash (quantum PoW simulation)
-- **Expected Rate:** ~100-500 H/s (depends on CPU)
-- **Nonce Range:** 0-1,000,000 per job
-- **Time per Range:** ~30s-300s (depends on CPU)
-
-### Future Performance (GPU - CUDA)
-- **Expected Rate:** ~100-500 kH/s (1000x speedup)
-- **Recommendation:** Port to GPU for practical mining
+### Performance (GPU - CUDA)
+- GTX 1660 SUPER: ~37 MH/s (indicative)
+- RTX 3060: ~65 MH/s (indicative)
 
 ## Monitoring
 
@@ -138,4 +130,4 @@ Watch for these log messages:
 5. 🔄 Implement continuous mining (loop until new job)
 
 ---
-*Replace YOUR_WALLET_ADDRESS with your actual QubitCoin wallet address*
+*Replace YOUR_WALLET_ADDRESS with your actual Qubitcoin wallet address*

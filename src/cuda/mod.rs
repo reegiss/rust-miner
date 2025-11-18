@@ -1,4 +1,8 @@
-/// CUDA mining implementation for qhash
+/// CUDA mining implementation
+mod qhash_backend;
+
+pub use qhash_backend::QHashCudaBackend;
+
 use anyhow::{anyhow, Result};
 use cudarc::driver::*;
 use cudarc::nvrtc::compile_ptx;
@@ -11,8 +15,9 @@ use cudarc::driver::sys::CUresult;
 
 const CUDA_KERNEL_SRC: &str = include_str!("qhash.cu");
 
+/// Internal CUDA miner implementation (used by backends)
 #[derive(Clone)]
-pub struct CudaMiner {
+pub(crate) struct CudaMiner {
     device: Arc<CudaDevice>,
     func: CudaFunction,
     last_kernel_ms: Arc<AtomicU64>, // duration of last kernel for adaptive polling
@@ -20,7 +25,7 @@ pub struct CudaMiner {
 
 impl CudaMiner {
     /// Create new CUDA miner
-    pub fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         // Initialize CUDA device
         let device = CudaDevice::new(0)?;
         
@@ -50,7 +55,7 @@ impl CudaMiner {
     /// Mine a job on GPU (blocking, low CPU via driver polling + sleep)
     ///
     /// Returns Option<(nonce, hash)> if a valid share is found
-    pub fn mine_job(
+    pub(crate) fn mine_job(
         &self,
         block_header: &[u8; 76],  // Header without nonce (76 bytes)
         ntime: u32,                // Network time
@@ -156,12 +161,12 @@ impl CudaMiner {
     }
     
     /// Get device name
-    pub fn device_name(&self) -> Result<String> {
+    pub(crate) fn device_name(&self) -> Result<String> {
         Ok(self.device.name()?)
     }
     
     /// Get device compute capability
-    pub fn compute_capability(&self) -> Result<(i32, i32)> {
+    pub(crate) fn compute_capability(&self) -> Result<(i32, i32)> {
         use cudarc::driver::sys::CUdevice_attribute;
         let major = self.device.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
         let minor = self.device.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
@@ -169,7 +174,7 @@ impl CudaMiner {
     }
 
     /// Get last kernel duration in milliseconds (0 if none yet)
-    pub fn last_kernel_ms(&self) -> u64 {
+    pub(crate) fn last_kernel_ms(&self) -> u64 {
         self.last_kernel_ms.load(Ordering::Relaxed)
     }
 }

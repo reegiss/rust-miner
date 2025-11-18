@@ -29,20 +29,12 @@ hex = "0.4"
 # Terminal colors
 colored = "2.1"
 
-# GPU detection - CUDA (optional)
-cuda-runtime-sys = { version = "0.3.0-alpha.1", optional = true }
-
-# GPU mining - CUDA (optional)
-cudarc = { version = "0.11", features = ["driver", "nvrtc", "cuda-12000"], optional = true }
-
-# GPU detection - OpenCL (optional)
-opencl3 = { version = "0.9", optional = true }
+# GPU mining - CUDA (required)
+cudarc = { version = "0.11", features = ["driver", "nvrtc", "cuda-12000"] }
 
 [dev-dependencies]
 hex = "0.4"
 
 [features]
-default = ["cuda"]
-cuda = ["dep:cuda-runtime-sys", "dep:cudarc"]
-opencl = ["dep:opencl3"]
-all-backends = ["cuda", "opencl"]
+default = []
+cuda = []  # Legacy feature flag for compatibility, CUDA is always enabled

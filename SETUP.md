@@ -1,4 +1,4 @@
-# Development Environment - rust-miner
+# Setup Guide - rust-miner (CUDA-only)
 
 ## ✅ Current Environment
 
@@ -8,16 +8,15 @@
 - **RAM**: 15GB available
 - **OS**: Ubuntu 24.04 LTS
 
-### Installed Software
-- ✅ **GCC**: 13.3.0 (C/C++ compiler)
-- ✅ **Git**: 2.43.0
-- ✅ **NVIDIA Driver**: 580.95.05
-- ✅ **CUDA**: 13.0
+### Installed Software (example)
+- ✅ GCC / Clang
+- ✅ Git
+- ✅ NVIDIA Driver
+- ✅ CUDA Toolkit (12.x or newer)
 
 ### Pending Software
-- ❌ **Rust**: Not installed (required)
-- ❌ **OpenCL**: Not installed (recommended for GPU)
-- ❌ **CUDA Toolkit**: Verify complete installation
+- ❌ Rust (required)
+- ❌ CUDA Toolkit (required)
 
 ## 📦 Rust Installation
 
@@ -50,65 +49,32 @@ rustup default stable
 rustup component add clippy rustfmt rust-analyzer
 ```
 
-## 🎮 GPU Configuration
+## 🎮 GPU Configuration (CUDA-only)
 
-### ⭐ Recommendation: CUDA (NVIDIA) - PRIMARY PRIORITY
+This project requires an NVIDIA GPU with CUDA. OpenCL is not supported.
 
-This project uses **CUDA as primary backend** for maximum performance on NVIDIA GPUs.
-OpenCL is maintained only as fallback for compatibility with other hardware.
-
-### Option 1: CUDA (NVIDIA) - **RECOMMENDED**
+### Install CUDA Toolkit (Ubuntu example)
 ```bash
-# Verify if CUDA toolkit is complete
-nvcc --version
+# Check
+nvcc --version || true
+nvidia-smi || true
 
-# If not installed, install CUDA Toolkit 13.0
-# Ubuntu 24.04:
+# Ubuntu 24.04 example install (adjust to your distro)
 wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
 sudo dpkg -i cuda-keyring_1.1-1_all.deb
 sudo apt update
-sudo apt install cuda-toolkit-13-0
+sudo apt install -y cuda-toolkit-12-5
 
-# Add to PATH
-echo 'export PATH=/usr/local/cuda-13.0/bin:$PATH' >> ~/.bashrc
-echo 'export LD_LIBRARY_PATH=/usr/local/cuda-13.0/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
+# Add to PATH (adjust version)
+echo 'export PATH=/usr/local/cuda-12.5/bin:$PATH' >> ~/.bashrc
+echo 'export LD_LIBRARY_PATH=/usr/local/cuda-12.5/lib64:$LD_LIBRARY_PATH' >> ~/.bashrc
 source ~/.bashrc
 
-# Verify installation
+# Verify
 nvcc --version
 nvidia-smi
 ```
-
-### Option 2: OpenCL (Fallback - AMD/Intel or NVIDIA without CUDA)
-```bash
-# Install NVIDIA OpenCL runtime
-sudo apt update
-sudo apt install ocl-icd-libopencl1 opencl-headers clinfo
-
-# Install NVIDIA support for OpenCL
-sudo apt install nvidia-opencl-icd-580
-
-# Verify installation
-clinfo
-```
-
-### Option 3: Both - CUDA + OpenCL (Maximum Flexibility)
-```bash
-# Install CUDA (priority)
-sudo apt install cuda-toolkit-13-0
-
-# Add OpenCL as fallback
-sudo apt install ocl-icd-libopencl1 opencl-headers clinfo nvidia-opencl-icd-580
-
-# Test CUDA (primary)
-nvcc --version
-nvidia-smi
-
-# Test OpenCL (fallback)
-clinfo | grep "Device Name"
-```
-
-**🎯 Recommendation**: Use Option 3 (both) for development, but prioritize CUDA in production.
+> Any CUDA 12.x+ toolkit is fine. The project uses cudarc and JIT compiles the kernel.
 
 ## 🔧 Development Tools
 
@@ -145,45 +111,18 @@ cargo install cargo-expand
 cargo install cargo-bloat
 ```
 
-## 🚀 Initialize Project
+## 🚀 Build & Run
 
 ```bash
-# Create Rust project
-cd /home/regis/develop/rust-miner
-cargo init --name rust-miner
+# Build (CUDA-only)
+cargo build --release
 
-# Add .gitignore
-cat > .gitignore << 'EOF'
-/target/
-Cargo.lock
-**/*.rs.bk
-*.pdb
-.DS_Store
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-EOF
-
-# Test initial build (CPU-only)
-cargo build
-cargo run
-
-# Test build with CUDA (recommended)
-cargo build --release --features cuda
-
-# Or with all backends
-cargo build --release --features all-backends
-
-# Run tests
-cargo test
-
-# Check formatting
-cargo fmt --check
-
-# Run linter
-cargo clippy
+# Run with your pool
+./target/release/rust-miner \
+	--algo qhash \
+	--url qubitcoin.luckypool.io:8610 \
+	--user YOUR_WALLET.WORKER \
+	--pass x
 ```
 
 ## ⚡ Environment Optimization
@@ -221,31 +160,19 @@ code --install-extension vadimcn.vscode-lldb
 code --install-extension serayuzgur.crates
 ```
 
-## 📊 System Benchmark
-
-### CPU Test
+## 📊 Sanity Checks
 ```bash
-# After installing Rust, create simple benchmark
-cargo new --bin cpu-bench
-cd cpu-bench
-
-# Add test code and run
-cargo build --release
-time ./target/release/cpu-bench
-```
-
-### GPU Test
-```bash
-# After configuring OpenCL/CUDA, test with examples
-# Will be implemented in main project
+rustc --version
+cargo --version
+nvcc --version
+nvidia-smi
 ```
 
 ## ✅ Setup Checklist
 
 - [ ] Install Rust via rustup
 - [ ] Install components: clippy, rustfmt, rust-analyzer
-- [ ] **Install CUDA Toolkit 13.0 (PRIORITY)**
-- [ ] Install OpenCL runtime (optional fallback)
+- [ ] Install CUDA Toolkit 12.x+ (PRIORITY)
 - [ ] Verify nvcc and nvidia-smi working
 - [ ] Verify clinfo (if installed OpenCL)
 - [ ] Install profiling tools (perf, valgrind)
@@ -254,20 +181,14 @@ time ./target/release/cpu-bench
 - [ ] Install VSCode extensions
 - [ ] Initialize project with cargo init
 - [ ] Test CPU build: `cargo build --release`
-- [ ] **Test CUDA build: `cargo build --release --features cuda`**
+- [ ] **Test build: `cargo build --release`**
 - [ ] Verify linter: cargo clippy
 
-## 🎯 Next Steps
+## 🎯 Notes
 
-1. **Install Rust** (priority)
-2. **Configure CUDA Toolkit 13.0** (primary backend - NVIDIA)
-3. **Install OpenCL** (optional - fallback for other hardware)
-4. **Initialize project structure** with cargo
-5. **Configure dependencies** in Cargo.toml (cudarc as primary)
-6. **Implement basic mining engine** (CPU first)
-7. **Add CUDA support** (maximum priority)
-8. **Add OpenCL** as fallback (optional)
-9. **Benchmarking and optimization** (CUDA vs CPU)
+- Project is CUDA-only, GPU required. There is no CPU mining mode.
+- Kernel is JIT-compiled via NVRTC at startup.
+- Backend is initialized before connecting to the pool to fail-fast on invalid `--algo`.
 
 ---
 **Available hardware**: Excellent for mining! 12 CPU threads + GTX 1660 SUPER (CUDA) is a solid configuration.

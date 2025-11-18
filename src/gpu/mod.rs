@@ -1,21 +1,16 @@
 pub mod cuda;
-pub mod opencl;
 
 use std::fmt;
 
-/// GPU backend type
+/// GPU backend type (CUDA-only)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuBackend {
     Cuda,
-    OpenCL,
 }
 
 impl fmt::Display for GpuBackend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            GpuBackend::Cuda => write!(f, "CUDA"),
-            GpuBackend::OpenCL => write!(f, "OpenCL"),
-        }
+        write!(f, "CUDA")
     }
 }
 
@@ -70,14 +65,11 @@ pub type GpuResult<T> = Result<T, GpuError>;
 /// Errors that can occur during GPU detection
 #[derive(Debug, thiserror::Error)]
 pub enum GpuError {
-    #[error("No compatible GPU detected")]
+    #[error("No compatible NVIDIA GPU detected")]
     NoGpuFound,
     
     #[error("CUDA runtime error: {0}")]
     CudaError(String),
-    
-    #[error("OpenCL error: {0}")]
-    OpenClError(String),
     
     #[error("GPU {0} not found")]
     DeviceNotFound(usize),
@@ -86,52 +78,19 @@ pub enum GpuError {
     InvalidDeviceId(String),
 }
 
-/// Detect all available GPUs
+/// Detect all available GPUs (CUDA-only)
 pub fn detect_gpus() -> GpuResult<Vec<GpuDevice>> {
-    let mut devices = Vec::new();
-    
-    // Try CUDA first (priority)
+    // CUDA is the only supported backend
     match cuda::detect_cuda_devices() {
-        Ok(mut cuda_devices) => {
-            tracing::info!("Found {} CUDA device(s)", cuda_devices.len());
-            devices.append(&mut cuda_devices);
+        Ok(devices) => {
+            tracing::info!("Found {} CUDA device(s)", devices.len());
+            Ok(devices)
         }
         Err(e) => {
-            tracing::debug!("CUDA detection failed: {}", e);
+            tracing::error!("CUDA detection failed: {}", e);
+            Err(GpuError::NoGpuFound)
         }
     }
-    
-    // Try OpenCL as fallback
-    match opencl::detect_opencl_devices() {
-        Ok(mut opencl_devices) => {
-            tracing::info!("Found {} OpenCL device(s)", opencl_devices.len());
-            
-            // Filter out duplicates (same GPU detected via both CUDA and OpenCL)
-            opencl_devices.retain(|ocl_dev| {
-                !devices.iter().any(|cuda_dev| {
-                    // Simple heuristic: if names are similar and memory matches, likely same device
-                    cuda_dev.name.contains(&ocl_dev.name[..10.min(ocl_dev.name.len())])
-                        && cuda_dev.memory_total == ocl_dev.memory_total
-                })
-            });
-            
-            devices.append(&mut opencl_devices);
-        }
-        Err(e) => {
-            tracing::debug!("OpenCL detection failed: {}", e);
-        }
-    }
-    
-    if devices.is_empty() {
-        return Err(GpuError::NoGpuFound);
-    }
-    
-    // Re-index devices sequentially
-    for (idx, device) in devices.iter_mut().enumerate() {
-        device.id = idx;
-    }
-    
-    Ok(devices)
 }
 
 /// Select GPUs by ID from command-line argument (e.g., "0,1,2")
@@ -167,7 +126,6 @@ mod tests {
     #[test]
     fn test_gpu_backend_display() {
         assert_eq!(format!("{}", GpuBackend::Cuda), "CUDA");
-        assert_eq!(format!("{}", GpuBackend::OpenCL), "OpenCL");
     }
 
     #[test]
@@ -186,12 +144,12 @@ mod tests {
             GpuDevice {
                 id: 1,
                 name: "Test GPU 2".to_string(),
-                backend: GpuBackend::OpenCL,
+                backend: GpuBackend::Cuda,
                 memory_total: 8_000_000_000,
                 compute_units: 2048,
                 clock_mhz: 1800,
                 pci_bus_id: None,
-                compute_capability: "3.0".to_string(),
+                compute_capability: "8.6".to_string(),
             },
         ];
         
@@ -215,12 +173,12 @@ mod tests {
             GpuDevice {
                 id: 1,
                 name: "Test GPU 2".to_string(),
-                backend: GpuBackend::OpenCL,
+                backend: GpuBackend::Cuda,
                 memory_total: 8_000_000_000,
                 compute_units: 2048,
                 clock_mhz: 1800,
                 pci_bus_id: None,
-                compute_capability: "3.0".to_string(),
+                compute_capability: "8.6".to_string(),
             },
         ];
         

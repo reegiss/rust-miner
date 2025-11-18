@@ -30,14 +30,14 @@ fn hex_to_bytes_le(hex: &str) -> Result<Vec<u8>> {
     Ok(bytes.into_iter().rev().collect())
 }
 
-/// Convert hex string to bytes (as-is for big-endian)
-fn hex_to_bytes_be(hex: &str) -> Result<Vec<u8>> {
+/// Convert hex string to big-endian bytes
+pub fn hex_to_bytes_be(hex: &str) -> Result<Vec<u8>> {
     let hex = hex.trim_start_matches("0x");
     Ok(hex::decode(hex)?)
 }
 
-/// Convert hex string to u32 (little-endian)
-fn hex_to_u32_le(hex: &str) -> Result<u32> {
+/// Convert hex string to little-endian u32
+pub fn hex_to_u32_le(hex: &str) -> Result<u32> {
     let bytes = hex_to_bytes_be(hex)?;
     if bytes.len() != 4 {
         return Err(anyhow!("Expected 4 bytes for u32, got {}", bytes.len()));
@@ -98,7 +98,7 @@ pub fn build_block_header(
 }
 
 /// Calculate merkle root from coinbase transaction
-fn calculate_merkle_root(
+pub fn calculate_merkle_root(
     job: &StratumJob,
     extranonce1: &str,
     extranonce2: &[u8],
@@ -235,8 +235,7 @@ pub fn mine_job_cpu(
     Ok(None)
 }
 
-/// Mine a job using GPU (CUDA)
-#[cfg(feature = "cuda")]
+/// Mine a job using GPU (CUDA - the only supported backend)
 pub fn mine_job_gpu(
     cuda_miner: &crate::cuda::CudaMiner,
     job: &StratumJob,

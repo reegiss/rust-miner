@@ -1,19 +1,19 @@
 # rust-miner
 
-A high-performance cryptocurrency mining application written in Rust with GPU acceleration support.
+High-performance GPU cryptocurrency miner written in Rust. CUDA-only, future-proof architecture with dynamic algorithm dispatch.
 
-**Cross-Platform**: Runs on both Linux and Windows with identical features and performance.
+• Cross-Platform: Linux and Windows
+• GPU Required: NVIDIA GPU with CUDA (no CPU mining)
 
 ## ⚡ Features
 
-- **Cross-Platform** - Runs on Linux and Windows
-- **CUDA Support** - Optimized for NVIDIA GPUs (GPU required)
-- **High Performance** - Zero-copy GPU operations, kernel returns hash directly
-- **GPU Required** - No CPU fallback mining (dedicated GPU hardware mandatory)
-- **Stratum V1 Protocol** - Compatible with standard mining pools
-- **QHash Algorithm** - Quantum-resistant mining algorithm support
-- **Adaptive Batch Sizing** - Dynamic nonce range optimization
-- **Low CPU Usage** - Efficient non-blocking GPU polling (~6% CPU)
+- CUDA-only backend (NVIDIA GPUs)
+- Dynamic algorithm dispatch via trait-based backend
+- QHash (quantum PoW) implemented on CUDA
+- Stratum V1 protocol (subscribe, notify, submit)
+- Kernel returns final hash directly (no CPU recomputation)
+- Adaptive batch sizing (targets ~700–900 ms per kernel)
+- Efficient non-blocking driver polling (~6% CPU)
 
 ## 🚀 Quick Start
 
@@ -69,41 +69,31 @@ For detailed setup instructions, see [QUICKSTART.md](QUICKSTART.md) or [SETUP.md
 - OS: Linux (Ubuntu 22.04+) or Windows 11
 - CUDA Toolkit 12.0+
 
-**⚠️ Important**: This application requires an NVIDIA GPU with CUDA support. Systems without compatible NVIDIA hardware cannot mine.
+⚠️ This application requires an NVIDIA GPU with CUDA support. Systems without compatible NVIDIA hardware cannot mine.
 
-## 🔧 Build Options
+## 🔧 Build & Test
 
 ```bash
-# Standard CUDA build (NVIDIA GPUs)
+# Build (CUDA required)
 cargo build --release
 
-# Development build with debug symbols
+# Dev build
 cargo build
 
 # Run tests
 cargo test
 ```
 
-**Note**: CUDA is the only supported backend. CPU mining is not available.
+Note: CUDA is the only supported backend. CPU mining is not available.
 
-## 📊 Performance
+## 📊 Performance (indicative)
 
-Measured hash rates on real hardware:
+- GTX 1660 SUPER (CUDA) — QHash: ~37 MH/s
+- RTX 3060 (CUDA) — QHash: ~65 MH/s
 
-| Hardware | Algorithm | Hash Rate | Power Usage |
-|----------|-----------|-----------|-------------|
-| **GTX 1660 SUPER (CUDA)** | **QHash** | **37.40 MH/s** | ~125W |
-| GTX 1660 SUPER (CUDA) | SHA256d | ~600 MH/s | ~125W |
-| GTX 1050 Ti (CUDA) | QHash | ~18 MH/s | ~75W |
-| RTX 3060 (CUDA) | QHash | ~65 MH/s | ~170W |
-
-**Performance Features**:
-- ✅ GPU returns hash directly (no CPU recomputation)
-- ✅ Adaptive batch sizing (targets 700-900ms per kernel)
-- ✅ Non-blocking polling with ~6% CPU usage
-- ✅ Zero-copy memory operations where possible
-
-**Note**: CPU mining is not supported. CUDA-capable NVIDIA GPU is required.
+Notes:
+- Hashrate depends on CUDA version/driver and power limits.
+- CPU mining is not supported.
 
 ## 🏗️ Architecture
 
@@ -112,28 +102,31 @@ rust-miner/
 ├── src/
 │   ├── main.rs              # Entry point, mining orchestration
 │   ├── cli.rs               # Command-line interface
-│   ├── mining.rs            # Mining coordination layer
+│   ├── backend.rs           # MiningBackend trait (dynamic algorithm dispatch)
 │   ├── cuda/
-│   │   ├── mod.rs           # CUDA wrapper (Rust)
-│   │   └── qhash.cu         # QHash kernel (CUDA C++)
+│   │   ├── mod.rs           # CUDA wrapper and device mgmt
+│   │   ├── qhash.cu         # QHash kernel (CUDA C++)
+│   │   └── qhash_backend.rs # QHash backend implementing MiningBackend
+│   ├── mining.rs            # Helpers: merkle, targets, conversions
 │   ├── stratum/
 │   │   ├── client.rs        # Stratum V1 client
 │   │   └── protocol.rs      # Protocol types
-│   ├── algorithms/
-│   │   ├── mod.rs           # Algorithm trait
-│   │   └── qhash.rs         # QHash CPU (testing only)
 │   └── gpu/
 │       ├── mod.rs           # GPU detection
 │       └── cuda.rs          # CUDA device info
 └── .github/
-    └── copilot-instructions.md  # Development guidelines
+  └── copilot-instructions.md  # Development guidelines
 ```
 
-**Architecture Principles**:
+Key ideas:
 - GPU-mandatory design (no CPU fallback)
 - CUDA-only backend (no OpenCL)
-- Kernel returns (nonce, hash) directly - eliminates CPU recomputation
-- Efficient spawn_blocking + adaptive sleep polling (~6% CPU)
+- Trait-based backend abstraction (future algorithms plug-in)
+- Kernel returns (nonce, hash) directly
+- Adaptive chunk sizing and low-CPU polling
+
+Supported algorithms:
+- qhash
 
 ## 🧪 Testing
 
@@ -144,8 +137,7 @@ cargo test
 # Run tests with output
 cargo test -- --nocapture
 
-# Run CUDA-specific tests (requires GPU)
-cargo test --test cuda_tests
+# GPU-specific tests require hardware
 
 # Check code without building
 cargo check
@@ -188,6 +180,8 @@ rust-miner --help
   --pass x
 ```
 
+Tip: backend is initialized before pool connect to fail-fast on unsupported --algo.
+
 ## 🤝 Contributing
 
 Contributions are welcome! Please read our development guidelines in `.github/copilot-instructions.md` for code conventions and best practices.
@@ -205,7 +199,7 @@ This software is for educational purposes. Please ensure compliance with local r
 - [Rust Book](https://doc.rust-lang.org/book/)
 - [CUDA Programming Guide](https://docs.nvidia.com/cuda/)
 - [cudarc Documentation](https://docs.rs/cudarc)
-- [OpenCL Specification](https://www.khronos.org/opencl/)
+- [Qubitcoin LuckyPool](https://luckypool.io/)
 
 ---
 
