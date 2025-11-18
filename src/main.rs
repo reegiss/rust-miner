@@ -15,6 +15,9 @@ use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus};
 use mining::MiningStats;
 use stratum::{StratumClient, StratumConfig};
+use std::collections::VecDeque;
+use std::process::Command;
+use std::time::Duration;
 
 // CPU fallback removed by design. This miner requires a compatible GPU.
 
@@ -182,6 +185,13 @@ async fn main() -> Result<()> {
     
     // Mining statistics
     let mut stats = MiningStats::new();
+    // Hashrate moving-average tracker (samples = recent per-kernel hash rates)
+    let mut hr_window: VecDeque<f64> = VecDeque::with_capacity(8);
+    const HR_WINDOW_SIZE: usize = 8;
+    // Full history of samples for 10s/60s/15m windows
+    let mut hr_history: VecDeque<(std::time::Instant, u64)> = VecDeque::new();
+    // Long-term windows for 1h/6h/24h views (sample per chunk)
+    let mut long_samples: VecDeque<(std::time::Instant, u64)> = VecDeque::new();
     let mut extranonce2_counter: u32 = 0;
     
     // Ctrl+C handler with atomic flag
@@ -213,16 +223,11 @@ async fn main() -> Result<()> {
         tokio::select! {
             Some(job) = stratum_client.get_job() => {
                 job_count += 1;
-                println!("\n{} {} {}", 
+                println!("\n{} {}", 
                     "📋 Job".cyan().bold(),
-                    format!("#{}", job_count).bright_white(),
-                    format!("(ID: {})", job.job_id).dimmed()
+                    format!("#{} (ID: {})", job_count, job.job_id).bright_white()
                 );
-                println!("   {} {}", "Previous Hash:".green(), job.prevhash);
-                println!("   {} {}", "Network Time:".green(), job.ntime);
-                println!("   {} {}", "Difficulty:".green(), job.nbits);
-                println!("   {} {}", "Clean Jobs:".green(), job.clean_jobs);
-                
+
                 // Get extranonce1 from client
                 let extranonce1 = match stratum_client.get_extranonce1().await {
                     Some(en1) => en1,
@@ -239,6 +244,9 @@ async fn main() -> Result<()> {
                 println!("   {} {}", "Extranonce1:".green(), extranonce1);
                 println!("   {} {}", "Extranonce2:".green(), hex::encode(&extranonce2));
                 println!("\n{}", "⛏️  Mining...".yellow().bold());
+
+                // Print WildRig-style stats at job start (best-effort)
+                print_wildrig_stats(&backend, &hr_history, &stats)?;
                 
                 let start_time = std::time::Instant::now();
                 
@@ -316,14 +324,43 @@ async fn main() -> Result<()> {
                                     let elapsed = start_time.elapsed();
                                     if elapsed.as_secs() > 0 {
                                         let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
+                                        // Compute recent moving-average based on last kernel samples
+                                        let kernel_ms = backend_clone.last_kernel_ms();
+                                        if kernel_ms > 0 {
+                                            let sample = (chunk_size as f64) / (kernel_ms as f64 / 1000.0);
+                                            hr_window.push_back(sample);
+                                            if hr_window.len() > HR_WINDOW_SIZE {
+                                                hr_window.pop_front();
+                                            }
+                                        }
+
+                                        // Record a sample for more detailed windows (sample = num_hashes)
+                                        hr_history.push_back((std::time::Instant::now(), num_hashes));
+                                        // Discard samples older than 15 minutes to bound memory
+                                        while let Some((t, _)) = hr_history.front() {
+                                            if t.elapsed() > Duration::from_secs(15 * 60) {
+                                                hr_history.pop_front();
+                                            } else {
+                                                break;
+                                            }
+                                        }
+
+                                        // Compute average of samples if available, otherwise use cumulative rate
+                                        let recent_avg = if !hr_window.is_empty() {
+                                            hr_window.iter().copied().sum::<f64>() / hr_window.len() as f64
+                                        } else {
+                                            hashrate
+                                        };
+
+                                        // Simplified log: only MH/s and kernel latency
                                         tracing::info!(
-                                            "GPU: {} hashes | {:.2} MH/s | batch={} | last_kernel={}ms",
-                                            stats.hashes,
+                                            "GPU: {:.2} MH/s | last_kernel={}ms",
                                             hashrate / 1_000_000.0,
-                                            chunk_size,
-                                            backend_clone.last_kernel_ms()
+                                            kernel_ms
                                         );
                                     }
+                                        // Also print a WildRig-like statistics block every time we log
+                                        print_wildrig_stats(&backend_clone, &hr_history, &stats)?;
                                 }
                                 
                                 current_nonce = current_nonce.wrapping_add(chunk_size);
@@ -400,10 +437,126 @@ async fn main() -> Result<()> {
                     println!("\n{}", "=== Statistics ===".cyan());
                     println!("   {} {}", "Total Hashes:".green(), stats.hashes);
                     println!("   {} {}", "Shares Found:".green(), stats.shares_found);
+                    // Print WildRig-like statistics block (best-effort)
+                    print_wildrig_stats(&backend, &hr_history, &stats)?;
+                    // Add a long-sample for the last processed chunk to support 1h/6h/24h views
+                    let now = std::time::Instant::now();
+                    long_samples.push_back((now, stats.hashes));
+                    // Purge samples older than 24h
+                    while let Some(&(t, _)) = long_samples.front() {
+                        if now.duration_since(t).as_secs() > 24 * 3600 {
+                            long_samples.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Compute hash-rate window functions
+                    let calc_window = |secs: u64| -> f64 {
+                        if long_samples.is_empty() { return 0.0; }
+                        let cutoff = now - std::time::Duration::from_secs(secs);
+                        // Sum bytes newer than cutoff
+                        let mut sum: u64 = 0;
+                        let mut earliest = now;
+                        for &(t, h) in long_samples.iter().rev() { // iterate from newest
+                            if t >= cutoff {
+                                sum = sum.saturating_add(h);
+                                earliest = t;
+                            } else {
+                                break;
+                            }
+                        }
+                        let dur = now.duration_since(earliest).as_secs_f64();
+                        if dur <= 0.0 { return 0.0; }
+                        (sum as f64) / dur
+                    };
+
+                    // Print 1h/6h/24h averages in MH/s
+                    let m1 = calc_window(3600) / 1_000_000.0;
+                    let m6 = calc_window(3600 * 6) / 1_000_000.0;
+                    let m24 = calc_window(3600 * 24) / 1_000_000.0;
+                    println!("   {} {:.2} MH/s | {} {:.2} MH/s | {} {:.2} MH/s", "1h".green(), m1, "6h".green(), m6, "24h".green(), m24);
                 }
             }
         }
     }
+
+    Ok(())
+}
+
+// Try to get GPU stats from nvidia-smi (best-effort). Returns (temp, fan, power, gfx_clock, mem_clock)
+fn get_gpu_stats(device_index: usize) -> Option<(Option<u32>, Option<u32>, Option<f64>, Option<u32>, Option<u32>)> {
+    // Query: temperature.gpu,fan.speed,power.draw,clocks.gr,clocks.mem
+    let out = Command::new("nvidia-smi")
+        .arg("--query-gpu=temperature.gpu,fan.speed,power.draw,clocks.gr,clocks.mem")
+        .arg("--format=csv,noheader,nounits")
+        .arg("-i")
+        .arg(format!("{}", device_index))
+        .output();
+
+    let Ok(out) = out else { return None; };
+    if !out.status.success() { return None; }
+
+    let s = String::from_utf8_lossy(&out.stdout);
+    let line = s.lines().next()?.trim();
+    let parts: Vec<&str> = line.split(',').map(|p| p.trim()).collect();
+    if parts.len() < 5 { return None; }
+
+    let temp = parts[0].parse::<u32>().ok();
+    let fan = parts[1].parse::<u32>().ok();
+    let power = parts[2].parse::<f64>().ok();
+    let gfx = parts[3].parse::<u32>().ok();
+    let mem = parts[4].parse::<u32>().ok();
+    Some((temp, fan, power, gfx, mem))
+}
+
+// Print stats in WildRig-like format (single GPU supported currently)
+fn print_wildrig_stats(backend: &std::sync::Arc<dyn MiningBackend>, hr_history: &VecDeque<(std::time::Instant, u64)>, stats: &MiningStats) -> anyhow::Result<()> {
+    use std::fmt::Write as _;
+
+    let device_name = backend.device_name().unwrap_or_else(|_| "Unknown GPU".to_string());
+    let idx = 0usize; // single-device support for now
+
+    // Calculate rates
+    let now = std::time::Instant::now();
+    let rate_for = |secs: u64| -> f64 {
+        let window = Duration::from_secs(secs);
+        let sum: u64 = hr_history
+            .iter()
+            .filter(|(t, _)| now.duration_since(*t) <= window)
+            .map(|(_, n)| *n)
+            .sum();
+        sum as f64 / window.as_secs_f64()
+    };
+
+    let rate10 = rate_for(10);
+    let rate60 = rate_for(60);
+    let rate15m = rate_for(15 * 60);
+
+    let gstat = get_gpu_stats(idx).unwrap_or((None, None, None, None, None));
+
+    let mut buf = String::new();
+    writeln!(buf, "--------------------------------------[Statistics]--------------------------------------").ok();
+    writeln!(buf, " ID Name                         Hashrate Temp  Fan  Power   Eff CClk MClk     A   R   I").ok();
+    writeln!(buf, "----------------------------------------------------------------------------------------").ok();
+    // Per-device row
+    writeln!(buf, " #{} {:26} {:9.2} MH/s  {}C  {}%  {:.1}W   -   {}   {}     -   -   - ",
+        idx,
+        format!("{}", device_name),
+        rate10 / 1_000_000.0,
+        gstat.0.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string()),
+        gstat.1.map(|f| f.to_string()).unwrap_or_else(|| "-".to_string()),
+        gstat.2.unwrap_or(0.0),
+        gstat.3.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
+        gstat.4.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string())
+    ).ok();
+    writeln!(buf, "----------------------------------------------------------------------------------------").ok();
+    writeln!(buf, " 10s: {:>28.2} MH/s Power: {:>7.1}W            Accepted: {:8} ", rate10 / 1_000_000.0, gstat.2.unwrap_or(0.0), stats.shares_accepted).ok();
+    writeln!(buf, " 60s: {:>32.2} MH/s                             Rejected: {:8} ", rate60 / 1_000_000.0, stats.shares_rejected).ok();
+    writeln!(buf, " 15m: {:>31.2} MH/s                             Ignored:  {:8} ", rate15m / 1_000_000.0, 0).ok();
+    writeln!(buf, "[{}]----------------------------------------------------------[ver. {}]", humantime::format_duration(now.elapsed()), env!("CARGO_PKG_VERSION")).ok();
+
+    println!("{}", buf);
 
     Ok(())
 }
