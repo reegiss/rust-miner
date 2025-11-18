@@ -64,63 +64,35 @@ float right = __shfl_down_sync(0xFFFFFFFF, my_val, 1);
 | Occupancy | 50% | 75%+ | Register tuning |
 | Power Eff | 0.9 MH/W | 2.5+ MH/W | Instruction/clock |
 
-## 📋 Plano de Ação (ATUALIZADO - PROFILING FIRST)
+## 📋 Plano de Ação (ATUALIZADO - FASE 1 COMPLETA)
 
-### ❌ [PASSO 1] ~~Loop Unrolling Manual~~ (COMPLETADO - FALHOU)
-- ✅ Testado: manual unroll, pragma unroll 4
-- ✅ Resultado: Ambos degradaram performance 78-83%
-- ✅ Decisão: MANTER baseline `#pragma unroll 64`
-- ⏭️ **Próximo**: Profiling para identificar REAL bottleneck
+### ✅ [PASSO 1] Warp Divergence Fix (COMPLETO)
+- ✅ Identificado: 96.9% de threads inativos em quantum_simulation
+- ✅ Solução: Reduzir threads_per_block de 512 → 128
+- ✅ Resultado: **kernel_time 480ms → 400ms (-16.7%)**
+- ✅ Commits: 3bba943 (tuning), 65bf8bb (phase1 complete)
 
-### ✅ [PASSO 2] Profiling Detalhado (PRÓXIMO - CRÍTICO)
-**Comandos a executar**:
-```bash
-# Medir occupancy e memory bandwidth
-nvprof --metrics achieved_occupancy,sm_efficiency,memory_load_gld_efficiency \
-  ./target/release/rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 \
-  --wallet bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f --worker RIG-1 --pool-pass x
+### ✅ [PASSO 2] Profiling Detalhado (COMPLETO)
+- ✅ Método: Code analysis + nvidia-smi monitoring (nvprof não suporta CC 7.5)
+- ✅ Descobertas: Gargalo NÃO é SHA256_transform (já bem otimizado)
+- ✅ Gargalo REAL: Warp divergence em threads inativas
+- ✅ Documentação: PROFILING_ANALYSIS.md, PHASE_1_RESULTS.md
 
-# Medir bank conflicts em shared memory
-nvprof --events shared_load_bank_conflict,shared_store_bank_conflict \
-  ./target/release/rust-miner ...
+### 🔄 [PASSO 3] Investigar Hashrate Variability (PRÓXIMO)
+- [ ] Observação: kernel_time estável (400ms) mas hashrate varia (6-12 MH/s)
+- [ ] Suspeita: Não é kernel, mas nonce distribution ou pool metrics
+- [ ] Ação: Aumentar batch size de nonces ou investigar host thread scheduling
+- [ ] Target: Entender por que 480ms kernel → 37 MH/s inicial vs 12 MH/s agora
 
-# Verificar register pressure
-nvprof --metrics local_load,local_store,register_replay \
-  ./target/release/rust-miner ...
-```
-**Métricas a coletar**:
-- [ ] Occupancy % (target: 75%+)
-- [ ] Memory bandwidth utilization (vs. peak 336 GB/s GTX 1660)
-- [ ] Shared memory bank conflicts (em quantum_simulation)
-- [ ] Register spills/reloads
-- [ ] L1/L2 cache hit rates
-- [ ] IPC (instructions per clock)
+### [PASSO 4] Memory Bandwidth Optimization (FUTURO)
+- [ ] Investigar: w[64] array em stack pode causar local memory spills
+- [ ] Solução: Move para global memory com cuidado de bandwidth
+- [ ] Target: +10-15% se memory-bound
 
-**Suspeitas atuais** (ordem de probabilidade):
-1. **Shared memory access patterns** em quantum_simulation (256 floats, potencial bank conflicts)
-2. **Low occupancy** devido register pressure (w[64] na sha256_transform)
-3. **Memory bandwidth bottleneck** em data transfers entre threads
-4. **Branch divergence** em quantum operations ou validation
-
-### ✅ [PASSO 3] Otimizar Gargalo Identificado (DEPOIS DO PROFILING)
-**Cenários possíveis**:
-- **Se shared memory bank conflicts**: Implementar __shfl_sync para quantum_simulation
-- **Se low occupancy**: Reduzir w[64] local array (usar global memory ou restructure)
-- **Se memory bandwidth**: Batch nonces melhor, prefetch anticipation
-- **Se branch divergence**: Substituir condicionais com arithmetic
-
-### ✅ [PASSO 4] Validação & Benchmark
-- [ ] Run 5x 40-segundo benchmarks após cada mudança
-- [ ] Documentar: hashrate min/max/avg, kernel time, power
-- [ ] Comparar vs. 37 MH/s baseline
-- [ ] Se melhora >= 10%: commit e continua
-- [ ] Se melhora < 10%: revert e próxima ideia
-
-### ✅ [PASSO 5] Git Workflow
-- [ ] Commit cada mudança com medições completas
-- [ ] Branch: `optimization/profiling-phase`
-- [ ] MR com benchmark comparisons
-- [ ] Merge apenas se baseline 37 MH/s não regrediu
+### [PASSO 5] IPC Improvement (FUTURO)
+- [ ] Investigar: Instruction-level parallelism na SHA256 transform
+- [ ] Solução: Rearranjar computações para maior ILP
+- [ ] Target: +5-10% se compute-bound
 
 ## ⚖️ Trade-offs
 
