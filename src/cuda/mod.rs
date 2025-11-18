@@ -76,9 +76,12 @@ impl CudaMiner {
         let d_found_hash = self.device.htod_copy(h_found_hash.clone())?;
         
         // Launch configuration - optimized for QHash
-        // QHash kernel uses many registers but benefits from high occupancy
-        // Testing showed 512 threads/block gives best performance on modern GPUs
-        let threads_per_block = 512;
+        // OPTIMIZATION PHASE 1: Reduce warp divergence
+        // Quantum simulation only uses 16 threads, other 496 are idle waiting in syncthreads()
+        // Reducing to 64 threads/block reduces warp divergence overhead
+        // This may reduce occupancy but increases per-thread efficiency
+        // Test target: compare 37 MH/s baseline vs. 64-thread variant
+        let threads_per_block = 64;
         let num_blocks = (num_nonces + threads_per_block - 1) / threads_per_block;
         
         tracing::debug!(

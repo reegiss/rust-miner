@@ -22,18 +22,24 @@
 
 ## ✅ Abordagens Comprovadas (A Implementar)
 
-### Fase 1: Loop Unrolling Agressivo no SHA256
-```cuda
-// Atual: #pragma unroll 64
-// Melhorado: Manual unrolling com grupos de 8 rounds
+### ❌ Fase 1: Loop Unrolling & PTX Assembly (FALHADA - CANCELADA)
+- **Testado**: Manual unrolling (8 rounds): 6 MH/s (83% regressão)
+- **Testado**: `#pragma unroll 4`: 7.81 MH/s (78% regressão) 
+- **Testado**: Baseline `#pragma unroll 64`: 37 MH/s (estável, MANTIDO)
+- **Razão da falha**: 
+  - NVRTC compiler já otimiza loop bem; mais unroll = MENOS performance
+  - Menos unroll = mais register reuse, menos occupancy
+  - PTX inline assembly: overhead de function calls > benefit (12 MH/s, -67% vs baseline)
+- **Conclusão**: Gargalo **NÃO** é SHA256_transform latency
+- **Lição Crítica**: Compiler já está MUITO bem otimizado; otimizações manual degradam
 
-// Maximize ILP: 8 rounds simultâneos em registros
-RND_0(); RND_1(); RND_2(); RND_3();
-RND_4(); RND_5(); RND_6(); RND_7();
-// GPU executa estas em paralelo antes de sincronizar
-```
-
-### Fase 2: Warp-Level Optimization com __shfl_sync
+### ✅ Fase 2: Profiling para Identificar Gargalo Real
+Usar `nvprof` para medir:
+- **Occupancy**: Percentage de warps ativos (target: 75%+)
+- **Memory Bandwidth**: GB/s vs. peak GPU (GTX 1660: ~336 GB/s)
+- **Shared Memory Bank Conflicts**: Em quantum_simulation
+- **Register Pressure**: Spills/reloads (atualmente ~100 registros/thread?)
+- **L1/L2 Cache Hit Rates**: Memory access efficiency
 ```cuda
 // Em quantum_simulation: substituir shared_expectations[] com shuffles
 float my_val = expectations[tid];
@@ -42,10 +48,12 @@ float right = __shfl_down_sync(0xFFFFFFFF, my_val, 1);
 // Reduz bank conflicts em shared memory
 ```
 
-### Fase 3: Register Pressure Tuning
+### ✅ Fase 3: Register Pressure Tuning
 - Verificar `-Xptxas -O3` flag
 - Usar `maxregcount` para balancear occupancy vs. performance
 - Target: 64-96 registros/thread (máximo para SM 7.5)
+
+### ✅ Fase 3: Warp-Level Optimization com __shfl_sync
 
 ## 🔬 Métricas de Sucesso
 
@@ -55,6 +63,72 @@ float right = __shfl_down_sync(0xFFFFFFFF, my_val, 1);
 | Kernel Time | 480 ms | 100-150 ms | Reduzir branch divergence |
 | Occupancy | 50% | 75%+ | Register tuning |
 | Power Eff | 0.9 MH/W | 2.5+ MH/W | Instruction/clock |
+
+## 📋 Plano de Ação (ATUALIZADO - PROFILING FIRST)
+
+### ❌ [PASSO 1] ~~Loop Unrolling Manual~~ (COMPLETADO - FALHOU)
+- ✅ Testado: manual unroll, pragma unroll 4
+- ✅ Resultado: Ambos degradaram performance 78-83%
+- ✅ Decisão: MANTER baseline `#pragma unroll 64`
+- ⏭️ **Próximo**: Profiling para identificar REAL bottleneck
+
+### ✅ [PASSO 2] Profiling Detalhado (PRÓXIMO - CRÍTICO)
+**Comandos a executar**:
+```bash
+# Medir occupancy e memory bandwidth
+nvprof --metrics achieved_occupancy,sm_efficiency,memory_load_gld_efficiency \
+  ./target/release/rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 \
+  --wallet bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f --worker RIG-1 --pool-pass x
+
+# Medir bank conflicts em shared memory
+nvprof --events shared_load_bank_conflict,shared_store_bank_conflict \
+  ./target/release/rust-miner ...
+
+# Verificar register pressure
+nvprof --metrics local_load,local_store,register_replay \
+  ./target/release/rust-miner ...
+```
+**Métricas a coletar**:
+- [ ] Occupancy % (target: 75%+)
+- [ ] Memory bandwidth utilization (vs. peak 336 GB/s GTX 1660)
+- [ ] Shared memory bank conflicts (em quantum_simulation)
+- [ ] Register spills/reloads
+- [ ] L1/L2 cache hit rates
+- [ ] IPC (instructions per clock)
+
+**Suspeitas atuais** (ordem de probabilidade):
+1. **Shared memory access patterns** em quantum_simulation (256 floats, potencial bank conflicts)
+2. **Low occupancy** devido register pressure (w[64] na sha256_transform)
+3. **Memory bandwidth bottleneck** em data transfers entre threads
+4. **Branch divergence** em quantum operations ou validation
+
+### ✅ [PASSO 3] Otimizar Gargalo Identificado (DEPOIS DO PROFILING)
+**Cenários possíveis**:
+- **Se shared memory bank conflicts**: Implementar __shfl_sync para quantum_simulation
+- **Se low occupancy**: Reduzir w[64] local array (usar global memory ou restructure)
+- **Se memory bandwidth**: Batch nonces melhor, prefetch anticipation
+- **Se branch divergence**: Substituir condicionais com arithmetic
+
+### ✅ [PASSO 4] Validação & Benchmark
+- [ ] Run 5x 40-segundo benchmarks após cada mudança
+- [ ] Documentar: hashrate min/max/avg, kernel time, power
+- [ ] Comparar vs. 37 MH/s baseline
+- [ ] Se melhora >= 10%: commit e continua
+- [ ] Se melhora < 10%: revert e próxima ideia
+
+### ✅ [PASSO 5] Git Workflow
+- [ ] Commit cada mudança com medições completas
+- [ ] Branch: `optimization/profiling-phase`
+- [ ] MR com benchmark comparisons
+- [ ] Merge apenas se baseline 37 MH/s não regrediu
+
+## ⚖️ Trade-offs
+
+| Abordagem | Pros | Cons |
+|-----------|------|------|
+| PTX Inline | Total control, max perf potential | Complexo, difícil debug, breaking changes |
+| __shfl_sync | Pronto, documentado, comprovado | Memória ainda usada em outros contextos |
+| Loop Unroll Manual | Simples, predictável | Mais código, menos flexible |
 
 ## � Plano de Ação (ATUALIZADO)
 
