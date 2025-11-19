@@ -22,11 +22,11 @@ use std::time::Duration;
 // CPU fallback removed by design. This miner requires a compatible GPU.
 
 /// Create mining backend based on algorithm
-fn create_backend(algo: &str) -> Result<std::sync::Arc<dyn MiningBackend>> {
+fn create_backend(algo: &str) -> Result<std::sync::Arc<tokio::sync::Mutex<Box<dyn MiningBackend>>>> {
     match algo.to_lowercase().as_str() {
         "qhash" => {
             let backend = cuda::QHashCudaBackend::new()?;
-            Ok(std::sync::Arc::new(backend))
+            Ok(std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(backend))))
         }
         _ => {
             anyhow::bail!(
@@ -133,13 +133,32 @@ async fn main() -> Result<()> {
         tracing::info!("Initializing mining backend for algorithm: {}", args.algo);
         match create_backend(&args.algo) {
             Ok(backend) => {
-                let device_name = backend.device_name().unwrap_or_else(|_| "Unknown".to_string());
-                let (cc_major, cc_minor) = backend.compute_capability().unwrap_or((0, 0));
+                let mut backend_lock = backend.blocking_lock();
+                backend_lock.initialize()?;
+                
+                let device_info = backend_lock.device_info().unwrap_or(backend::GpuInfo {
+                    name: "Unknown".to_string(),
+                    compute_capability: (0, 0),
+                    memory_mb: 0,
+                    compute_units: 0,
+                    clock_mhz: 0,
+                });
+                
                 println!("\n{}", "=== GPU Mining Initialized ===".green().bold());
                 println!("   {}: {}", "Algorithm".cyan(), args.algo.yellow());
-                println!("   {}: {}", "Device".cyan(), device_name.green());
-                println!("   {}: {}.{}", "Compute Capability".cyan(), cc_major, cc_minor);
+                println!("   {}: {}", "Device".cyan(), device_info.name.green());
+                println!("   {}: {}.{}", "Compute Capability".cyan(), device_info.compute_capability.0, device_info.compute_capability.1);
+                if device_info.memory_mb > 0 {
+                    println!("   {}: {} MB", "Memory".cyan(), device_info.memory_mb);
+                }
+                if device_info.compute_units > 0 {
+                    println!("   {}: {}", "Compute Units".cyan(), device_info.compute_units);
+                }
+                if device_info.clock_mhz > 0 {
+                    println!("   {}: {} MHz", "Clock".cyan(), device_info.clock_mhz);
+                }
                 println!("   {}: Using CUDA kernel", "Mode".cyan());
+                drop(backend_lock);
                 backend
             }
             Err(e) => {
@@ -242,7 +261,9 @@ async fn main() -> Result<()> {
                 extranonce2_counter = extranonce2_counter.wrapping_add(1);
                 
                 // Extranonce values intentionally not printed to keep logs compact
-                println!("\n{}", "⛏️  Mining...".yellow().bold());
+                let algo = backend.blocking_lock().algorithm_name().to_string();
+                println!("\n{} Mining with algorithm: {}", "⛏️".yellow().bold(), algo.cyan());
+                println!("{}", "Mining...".yellow().bold());
 
                 // Print WildRig-style stats at job start (best-effort)
                 print_wildrig_stats(&backend, &hr_history, &stats)?;
@@ -254,7 +275,7 @@ async fn main() -> Result<()> {
                     let backend_clone = backend.clone();
                     // GPU Mining with adaptive batch sizing & polling
                     // Start with a larger batch to reduce host<->device churn
-                    let mut chunk_size = 50_000_000u32; // initial 50M nonces (~>500ms target)
+                    let chunk_size = 50_000_000u32; // initial 50M nonces (~>500ms target)
                     let mut current_nonce = 0u32;
                     let mut found_share = None;
                     let mut iterations = 0u32;
@@ -273,7 +294,8 @@ async fn main() -> Result<()> {
                         let extranonce1_clone = extranonce1.clone();
                         let extranonce2_clone = extranonce2.clone();
                         let result = tokio::task::spawn_blocking(move || {
-                            let mining_result = backend_for_task.mine_job(
+                            let backend_ref = backend_for_task.blocking_lock();
+                            let mining_result = backend_ref.mine_job(
                                 &job_clone,
                                 &extranonce1_clone,
                                 &extranonce2_clone,
@@ -285,17 +307,27 @@ async fn main() -> Result<()> {
                         }).await;
 
                         match result {
-                            Ok((Ok(Some((nonce, hash))), num_hashes)) => {
+                            Ok((Ok(mining_result), num_hashes)) => {
                                 // Merge stats
                                 stats.hashes += num_hashes;
-                                stats.shares_found += 1;
-                                found_share = Some((nonce, hash));
-                                break 'gpu_mining;
-                            }
-                            Ok((Ok(None), num_hashes)) => {
-                                // Merge stats
-                                stats.hashes += num_hashes;
-                                // Continue to next chunk
+                                
+                                // Log kernel execution time for monitoring
+                                tracing::trace!(
+                                    "Kernel executed: {} ms, {} hashes, kernel_time: {} ms",
+                                    mining_result.kernel_time_ms,
+                                    mining_result.hashes_computed,
+                                    mining_result.kernel_time_ms
+                                );
+                                
+                                if mining_result.found_share {
+                                    stats.shares_found += 1;
+                                    if let (Some(nonce), Some(hash)) = (mining_result.nonce, &mining_result.hash) {
+                                        found_share = Some((nonce, *hash.as_ref()));
+                                        break 'gpu_mining;
+                                    }
+                                }
+                                
+                                // No share found this chunk, continue
                                 iterations += 1;
                                 
                                 // Adaptive chunk sizing based on last kernel duration
@@ -319,7 +351,7 @@ async fn main() -> Result<()> {
                                     if elapsed.as_secs() > 0 {
                                         let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
                                         // Compute recent moving-average based on last kernel samples
-                                        let kernel_ms = backend_clone.last_kernel_ms();
+                                        let kernel_ms = backend_clone.blocking_lock().last_kernel_ms();
                                         if kernel_ms > 0 {
                                             let sample = (chunk_size as f64) / (kernel_ms as f64 / 1000.0);
                                             hr_window.push_back(sample);
@@ -518,10 +550,13 @@ fn get_gpu_stats(device_index: usize) -> Option<(Option<u32>, Option<u32>, Optio
 }
 
 // Print stats in WildRig-like format (single GPU supported currently)
-fn print_wildrig_stats(backend: &std::sync::Arc<dyn MiningBackend>, hr_history: &VecDeque<(std::time::Instant, u64)>, stats: &MiningStats) -> anyhow::Result<()> {
+fn print_wildrig_stats(backend: &std::sync::Arc<tokio::sync::Mutex<Box<dyn MiningBackend>>>, hr_history: &VecDeque<(std::time::Instant, u64)>, stats: &MiningStats) -> anyhow::Result<()> {
     use std::fmt::Write as _;
 
-    let device_name = backend.device_name().unwrap_or_else(|_| "Unknown GPU".to_string());
+    let backend_lock = backend.blocking_lock();
+    let device_name = backend_lock.device_info()
+        .map(|info| info.name)
+        .unwrap_or_else(|_| "Unknown GPU".to_string());
     let idx = 0usize; // single-device support for now
 
     // Calculate rates

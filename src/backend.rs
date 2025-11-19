@@ -1,14 +1,35 @@
-/// Mining backend trait for algorithm abstraction
-/// 
-/// This trait defines the interface that all mining backends must implement.
-/// It enables dynamic dispatch of different algorithms (qhash, sha256d, etc.)
-/// while maintaining a common interface for the mining loop.
+/// GPU Mining backend abstraction layer (Hexagonal Architecture - Port)
+/// Enables swapping GPU implementations (CUDA-only) and algorithms
 
 use anyhow::Result;
 use crate::stratum::StratumJob;
 
-/// Mining backend trait - all algorithms must implement this
+/// Result of a mining attempt
+#[derive(Clone, Debug)]
+pub struct MiningResult {
+    pub found_share: bool,
+    pub nonce: Option<u32>,
+    pub hash: Option<Box<[u8; 32]>>,
+    pub hashes_computed: u64,
+    pub kernel_time_ms: u32,
+}
+
+/// GPU device information
+#[derive(Clone, Debug)]
+pub struct GpuInfo {
+    pub name: String,
+    pub compute_capability: (i32, i32),
+    pub memory_mb: u32,
+    pub compute_units: u32,
+    pub clock_mhz: u32,
+}
+
+/// Mining backend trait - abstract interface for GPU mining
+/// All GPU backends (CUDA, future OpenCL/HIP) must implement this
 pub trait MiningBackend: Send + Sync {
+    /// Initialize GPU and allocate resources
+    fn initialize(&mut self) -> Result<()>;
+    
     /// Mine a job with the given parameters
     /// 
     /// # Arguments
@@ -19,9 +40,7 @@ pub trait MiningBackend: Send + Sync {
     /// * `num_nonces` - Number of nonces to try in this batch
     /// 
     /// # Returns
-    /// * `Ok(Some((nonce, hash)))` - Solution found
-    /// * `Ok(None)` - No solution in this range
-    /// * `Err(_)` - Mining error occurred
+    /// Mining result with found nonce (if any) and statistics
     fn mine_job(
         &self,
         job: &StratumJob,
@@ -29,17 +48,14 @@ pub trait MiningBackend: Send + Sync {
         extranonce2: &[u8],
         start_nonce: u32,
         num_nonces: u32,
-    ) -> Result<Option<(u32, [u8; 32])>>;
+    ) -> Result<MiningResult>;
     
     /// Get the algorithm name (e.g., "qhash", "sha256d")
-    fn _algorithm_name(&self) -> &str;
+    fn algorithm_name(&self) -> &str;
     
-    /// Get device name (e.g., "NVIDIA GeForce GTX 1660 SUPER")
-    fn device_name(&self) -> Result<String>;
+    /// Get GPU device info
+    fn device_info(&self) -> Result<GpuInfo>;
     
-    /// Get compute capability (major, minor) for CUDA devices
-    fn compute_capability(&self) -> Result<(i32, i32)>;
-    
-    /// Get last kernel execution time in milliseconds (for adaptive batching)
+    /// Get last kernel execution time in milliseconds (for monitoring)
     fn last_kernel_ms(&self) -> u64;
 }

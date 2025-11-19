@@ -4,7 +4,7 @@
 /// enabling dynamic algorithm dispatch.
 
 use anyhow::Result;
-use crate::backend::MiningBackend;
+use crate::backend::{MiningBackend, MiningResult, GpuInfo};
 use crate::stratum::StratumJob;
 use crate::mining::{calculate_merkle_root, nbits_to_target, hex_to_u32_le, hex_to_bytes_be};
 use super::CudaMiner;
@@ -23,6 +23,11 @@ impl QHashCudaBackend {
 }
 
 impl MiningBackend for QHashCudaBackend {
+    fn initialize(&mut self) -> Result<()> {
+        // CUDA initialization already done in CudaMiner::new()
+        Ok(())
+    }
+    
     fn mine_job(
         &self,
         job: &StratumJob,
@@ -30,7 +35,7 @@ impl MiningBackend for QHashCudaBackend {
         extranonce2: &[u8],
         start_nonce: u32,
         num_nonces: u32,
-    ) -> Result<Option<(u32, [u8; 32])>> {
+    ) -> Result<MiningResult> {
         // Parse ntime for QHash
         let ntime = hex_to_u32_le(&job.ntime)?;
         
@@ -76,19 +81,30 @@ impl MiningBackend for QHashCudaBackend {
         header_76[72..76].copy_from_slice(&nbits.to_le_bytes());
         
         // Mine on GPU
-        self.miner.mine_job(&header_76, ntime, &target, start_nonce, num_nonces)
+        let result = self.miner.mine_job(&header_76, ntime, &target, start_nonce, num_nonces)?;
+        
+        // Convert old format to new MiningResult
+        Ok(MiningResult {
+            found_share: result.is_some(),
+            nonce: result.as_ref().map(|(n, _)| *n),
+            hash: result.as_ref().map(|(_, h)| Box::new(*h)),
+            hashes_computed: (num_nonces as u64),
+            kernel_time_ms: self.last_kernel_ms() as u32,
+        })
     }
     
-    fn _algorithm_name(&self) -> &str {
+    fn algorithm_name(&self) -> &str {
         "qhash"
     }
     
-    fn device_name(&self) -> Result<String> {
-        self.miner.device_name()
-    }
-    
-    fn compute_capability(&self) -> Result<(i32, i32)> {
-        self.miner.compute_capability()
+    fn device_info(&self) -> Result<GpuInfo> {
+        Ok(GpuInfo {
+            name: self.miner.device_name()?,
+            compute_capability: self.miner.compute_capability()?,
+            memory_mb: 0, // TODO: query from CUDA
+            compute_units: 0, // TODO: query from CUDA
+            clock_mhz: 0, // TODO: query from CUDA
+        })
     }
     
     fn last_kernel_ms(&self) -> u64 {
