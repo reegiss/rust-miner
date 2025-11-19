@@ -50,9 +50,6 @@ pub trait MiningBackend: Send + Sync {
         num_nonces: u32,
     ) -> Result<MiningResult>;
     
-    /// Get the algorithm name (e.g., "qhash", "sha256d")
-    fn algorithm_name(&self) -> &str;
-    
     /// Get GPU device info
     fn device_info(&self) -> Result<GpuInfo>;
     

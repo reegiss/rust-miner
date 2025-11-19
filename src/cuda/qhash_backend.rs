@@ -93,10 +93,6 @@ impl MiningBackend for QHashCudaBackend {
         })
     }
     
-    fn algorithm_name(&self) -> &str {
-        "qhash"
-    }
-    
     fn device_info(&self) -> Result<GpuInfo> {
         Ok(GpuInfo {
             name: self.miner.device_name()?,

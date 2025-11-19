@@ -22,11 +22,14 @@ use std::time::Duration;
 // CPU fallback removed by design. This miner requires a compatible GPU.
 
 /// Create mining backend based on algorithm
-fn create_backend(algo: &str) -> Result<std::sync::Arc<tokio::sync::Mutex<Box<dyn MiningBackend>>>> {
+fn create_backend_sync(algo: &str) -> Result<(std::sync::Arc<tokio::sync::Mutex<Box<dyn MiningBackend>>>, backend::GpuInfo)> {
     match algo.to_lowercase().as_str() {
         "qhash" => {
-            let backend = cuda::QHashCudaBackend::new()?;
-            Ok(std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(backend))))
+            let mut backend = cuda::QHashCudaBackend::new()?;
+            backend.initialize()?;
+            let device_info = backend.device_info()?;
+            let arc_backend = std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(backend) as Box<dyn MiningBackend>));
+            Ok((arc_backend, device_info))
         }
         _ => {
             anyhow::bail!(
@@ -131,19 +134,8 @@ async fn main() -> Result<()> {
     // Initialize mining backend (algorithm-specific) - BEFORE connecting to pool
     let backend = {
         tracing::info!("Initializing mining backend for algorithm: {}", args.algo);
-        match create_backend(&args.algo) {
-            Ok(backend) => {
-                let mut backend_lock = backend.blocking_lock();
-                backend_lock.initialize()?;
-                
-                let device_info = backend_lock.device_info().unwrap_or(backend::GpuInfo {
-                    name: "Unknown".to_string(),
-                    compute_capability: (0, 0),
-                    memory_mb: 0,
-                    compute_units: 0,
-                    clock_mhz: 0,
-                });
-                
+        match create_backend_sync(&args.algo) {
+            Ok((backend, device_info)) => {
                 println!("\n{}", "=== GPU Mining Initialized ===".green().bold());
                 println!("   {}: {}", "Algorithm".cyan(), args.algo.yellow());
                 println!("   {}: {}", "Device".cyan(), device_info.name.green());
@@ -158,7 +150,6 @@ async fn main() -> Result<()> {
                     println!("   {}: {} MHz", "Clock".cyan(), device_info.clock_mhz);
                 }
                 println!("   {}: Using CUDA kernel", "Mode".cyan());
-                drop(backend_lock);
                 backend
             }
             Err(e) => {
@@ -261,12 +252,10 @@ async fn main() -> Result<()> {
                 extranonce2_counter = extranonce2_counter.wrapping_add(1);
                 
                 // Extranonce values intentionally not printed to keep logs compact
-                let algo = backend.blocking_lock().algorithm_name().to_string();
-                println!("\n{} Mining with algorithm: {}", "⛏️".yellow().bold(), algo.cyan());
+                println!("\n{} Mining with algorithm: {}", "⛏️".yellow().bold(), args.algo.cyan());
                 println!("{}", "Mining...".yellow().bold());
-
                 // Print WildRig-style stats at job start (best-effort)
-                print_wildrig_stats(&backend, &hr_history, &stats)?;
+                print_wildrig_stats(&backend, &hr_history, &stats).await?;
                 
                 let start_time = std::time::Instant::now();
                 
@@ -386,7 +375,7 @@ async fn main() -> Result<()> {
                                         );
                                     }
                                         // Also print a WildRig-like statistics block every time we log
-                                        print_wildrig_stats(&backend_clone, &hr_history, &stats)?;
+                                        print_wildrig_stats(&backend_clone, &hr_history, &stats).await?;
                                 }
                                 
                                 // Check for new job AFTER batch completes (not during)
@@ -477,7 +466,7 @@ async fn main() -> Result<()> {
                     println!("   {} {}", "Total Hashes:".green(), stats.hashes);
                     println!("   {} {}", "Shares Found:".green(), stats.shares_found);
                     // Print WildRig-like statistics block (best-effort)
-                    print_wildrig_stats(&backend, &hr_history, &stats)?;
+                    print_wildrig_stats(&backend, &hr_history, &stats).await?;
                     // Add a long-sample for the last processed chunk to support 1h/6h/24h views
                     let now = std::time::Instant::now();
                     long_samples.push_back((now, stats.hashes));
@@ -550,10 +539,10 @@ fn get_gpu_stats(device_index: usize) -> Option<(Option<u32>, Option<u32>, Optio
 }
 
 // Print stats in WildRig-like format (single GPU supported currently)
-fn print_wildrig_stats(backend: &std::sync::Arc<tokio::sync::Mutex<Box<dyn MiningBackend>>>, hr_history: &VecDeque<(std::time::Instant, u64)>, stats: &MiningStats) -> anyhow::Result<()> {
+async fn print_wildrig_stats(backend: &std::sync::Arc<tokio::sync::Mutex<Box<dyn MiningBackend>>>, hr_history: &VecDeque<(std::time::Instant, u64)>, stats: &MiningStats) -> anyhow::Result<()> {
     use std::fmt::Write as _;
 
-    let backend_lock = backend.blocking_lock();
+    let backend_lock = backend.lock().await;
     let device_name = backend_lock.device_info()
         .map(|info| info.name)
         .unwrap_or_else(|_| "Unknown GPU".to_string());
