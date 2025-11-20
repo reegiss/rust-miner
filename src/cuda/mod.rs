@@ -2,10 +2,14 @@
 mod qhash_backend;
 mod ethash_backend;
 mod ethash_miner;
+#[cfg(feature = "dag-gen-gpu")]
+mod ethash_dag_gen;
 
 pub use qhash_backend::QHashCudaBackend;
 pub use ethash_backend::EthashCudaBackend;
 pub use ethash_miner::EthashCudaMiner;
+#[cfg(feature = "dag-gen-gpu")]
+pub use ethash_dag_gen::EthashDagGpu;
 
 use anyhow::{anyhow, Result};
 use cudarc::driver::*;

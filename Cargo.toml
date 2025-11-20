@@ -1,10 +1,16 @@
 [package]
 name = "rust-miner"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+description = "High-performance CUDA-based cryptocurrency miner written in Rust with Stratum protocol support"
+authors = ["Regis"]
+repository = "https://github.com/reegiss/rust-miner"
+readme = "README.md"
+license = "MIT"
+keywords = ["mining", "crypto", "cuda", "gpu", "cryptocurrency"]
 
 [dependencies]
-# CLI
+# CLI argument parsing
 clap = { version = "4.4", features = ["derive", "color", "suggestions"] }
 
 # Async runtime
@@ -14,31 +20,35 @@ tokio = { version = "1.35", features = ["full"] }
 anyhow = "1.0"
 thiserror = "1.0"
 
-# Logging
+# Structured logging with environment-based filtering
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Serialization
+# Serialization for JSON protocol communication
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Cryptography
+# Cryptographic hashing (SHA2-256 for Stratum protocol, SHA3-256 for Ethash)
 sha2 = "0.10"
+sha3 = "0.10"
 hex = "0.4"
 humantime = "2.1"
 
-# Time handling
+# Time handling and formatting
 chrono = { version = "0.4", features = ["serde"] }
 
-# Terminal colors
+# Terminal output formatting
 colored = "2.1"
 
-# GPU mining - CUDA (required)
+# GPU acceleration via CUDA (NVIDIA GPUs only)
+# Required for mining - no fallback to CPU
 cudarc = { version = "0.11", features = ["driver", "nvrtc", "cuda-12000"] }
 
 [dev-dependencies]
 hex = "0.4"
 
 [features]
+# Feature gates
+# - dag-gen-gpu: enable GPU DAG generation scaffolding (opt-in to avoid unused-code lints)
 default = []
-cuda = []  # Legacy feature flag for compatibility, CUDA is always enabled
+dag-gen-gpu = []
