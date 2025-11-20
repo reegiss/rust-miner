@@ -398,9 +398,13 @@ async fn main() -> Result<()> {
     // Start GPU mining tasks (one per GPU)
     let stratum_client = std::sync::Arc::new(tokio::sync::Mutex::new(stratum_client));
     
+    // Keep reference to gpu_miners for stats display and updates
+    let gpu_miners_ref = std::sync::Arc::new(tokio::sync::Mutex::new(gpu_miners));
+    let gpu_miners_display = gpu_miners_ref.clone();
+    
     // Collect all GPU mining tasks
     let mut mining_tasks = Vec::new();
-    for gpu_miner in gpu_miners {
+    for gpu_miner in gpu_miners_ref.lock().await.clone() {
         let stats_tx = stats_tx.clone();
         let shutdown = shutdown.clone();
         let stratum_client = stratum_client.clone();
@@ -410,9 +414,6 @@ async fn main() -> Result<()> {
         });
         mining_tasks.push(task);
     }
-    
-    // Create a dummy gpu_miners vec for stats display (will be empty but that's ok for now)
-    let gpu_miners: Vec<GpuMiner> = vec![];
     
     // Main mining loop - manage GPU results and UI
     loop {
@@ -437,6 +438,13 @@ async fn main() -> Result<()> {
                     GpuMiningResult::StatsUpdate { gpu_index, hashes, kernel_ms } => {
                         // Update global stats
                         global_stats.hashes += hashes;
+                        
+                        // Update individual GPU stats
+                        if let Some(gpu_miner) = gpu_miners_display.lock().await.get_mut(gpu_index) {
+                            gpu_miner.stats.hashes += hashes;
+                            // Calculate hashrate based on recent hashes (simplified)
+                            gpu_miner.stats.current_hashrate = (hashes as f64) / (kernel_ms as f64 / 1000.0);
+                        }
                         
                         // Log per-GPU stats
                         tracing::trace!("GPU #{}: {} hashes, {} ms kernel", gpu_index, hashes, kernel_ms);
@@ -515,7 +523,8 @@ async fn main() -> Result<()> {
             // Periodic UI update
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
                 // Print WildRig-style stats for all GPUs
-                print_wildrig_stats_multi_gpu(&gpu_miners, &global_stats).await?;
+                let gpu_miners_locked = gpu_miners_display.lock().await;
+                print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats).await?;
             }
         }
         
@@ -525,7 +534,8 @@ async fn main() -> Result<()> {
             println!("   {} {}", "Total Hashes:".green(), global_stats.hashes);
             println!("   {} {}", "Shares Found:".green(), global_stats.shares_found);
             // Print WildRig-like statistics block (best-effort)
-            print_wildrig_stats_multi_gpu(&gpu_miners, &global_stats).await?;
+            let gpu_miners_locked = gpu_miners_display.lock().await;
+            print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats).await?;
             // Add a long-sample for the last processed chunk to support 1h/6h/24h views
             let now = std::time::Instant::now();
             long_samples.push_back((now, global_stats.hashes));
