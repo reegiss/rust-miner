@@ -12,7 +12,20 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cudarc::driver::sys::lib;
 use cudarc::driver::sys::CUresult;
 
+/// CUDA kernel source code (included at compile time)
 const CUDA_KERNEL_SRC: &str = include_str!("qhash.cu");
+
+/// Set CUDA device for current thread
+pub fn set_cuda_device(device_index: usize) -> Result<()> {
+    unsafe {
+        cudarc::driver::sys::lib().cuDevicePrimaryCtxRetain(
+            std::ptr::null_mut(),
+            device_index as i32
+        );
+        cudarc::driver::sys::lib().cuCtxSetCurrent(std::ptr::null_mut());
+    }
+    Ok(())
+}
 
 /// Helper to compile CUDA kernel with aggressive optimizations
 /// 
@@ -54,10 +67,13 @@ pub struct CudaMiner {
 }
 
 impl CudaMiner {
-    /// Create new CUDA miner
-    pub fn new() -> Result<Self> {
+    /// Create new CUDA miner for specific device
+    pub fn new(device_index: usize) -> Result<Self> {
+        // Set CUDA device before creating device context
+        set_cuda_device(device_index)?;
+        
         // Initialize CUDA device
-        let device = CudaDevice::new(0)?;
+        let device = CudaDevice::new(device_index)?;
         
         tracing::info!("Initializing CUDA miner...");
         

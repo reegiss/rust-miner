@@ -15,9 +15,9 @@ pub struct QHashCudaBackend {
 }
 
 impl QHashCudaBackend {
-    /// Create new QHash CUDA backend
-    pub fn new() -> Result<Self> {
-        let miner = CudaMiner::new()?;
+    /// Create new QHash CUDA backend for specific device
+    pub fn new(device_index: usize) -> Result<Self> {
+        let miner = CudaMiner::new(device_index)?;
         Ok(Self { miner })
     }
 }
