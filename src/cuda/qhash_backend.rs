@@ -44,13 +44,13 @@ impl MiningBackend for QHashCudaBackend {
         if nbits_bytes.len() != 4 {
             anyhow::bail!("Expected 4 bytes for nbits, got {}", nbits_bytes.len());
         }
-        let nbits = u32::from_be_bytes([nbits_bytes[0], nbits_bytes[1], nbits_bytes[2], nbits_bytes[3]]);
+        let nbits_original = u32::from_be_bytes([nbits_bytes[0], nbits_bytes[1], nbits_bytes[2], nbits_bytes[3]]);
+        
+        // Use the pool's actual difficulty
+        let nbits = nbits_original;
         let target = nbits_to_target(nbits);
         
-        // DEBUG: Log target calculation
-        tracing::info!("Target calculation: nbits=0x{:08x}, target={}", nbits, hex::encode(&target));
-        
-    // Calculate merkle root (SHA256d output is big-endian) and convert to little-endian for header
+        // Calculate merkle root (SHA256d output is big-endian) and convert to little-endian for header
     let mut merkle_root = calculate_merkle_root(job, extranonce1, extranonce2)?;
     merkle_root.reverse(); // Critical: block header stores merkle root little-endian
         
@@ -85,16 +85,6 @@ impl MiningBackend for QHashCudaBackend {
         
         // Mine on GPU
         let result = self.miner.mine_job(&header_76, ntime, &target, start_nonce, num_nonces)?;
-        
-        // Log mining result
-        match &result {
-            Some((nonce, hash)) => {
-                tracing::info!("🎉 SHARE FOUND! nonce={} hash={}", nonce, hex::encode(hash));
-            }
-            None => {
-                tracing::debug!("No share found in this batch (start_nonce={}, num_nonces={})", start_nonce, num_nonces);
-            }
-        }
         
         // Convert old format to new MiningResult
         Ok(MiningResult {

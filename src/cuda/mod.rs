@@ -49,6 +49,7 @@ fn compile_optimized_kernel() -> Result<cudarc::nvrtc::Ptx> {
 pub struct CudaMiner {
     device: Arc<CudaDevice>,
     func: CudaFunction,
+    d_lookup_table: CudaSlice<f64>, // Lookup table on GPU
     last_kernel_ms: Arc<AtomicU64>, // duration of last kernel for adaptive polling
 }
 
@@ -70,11 +71,38 @@ impl CudaMiner {
         let func = device.get_func("qhash", "qhash_mine")
             .ok_or_else(|| anyhow!("Failed to load qhash_mine function"))?;
         
-        tracing::info!("CUDA miner initialized successfully");
+        // Load lookup table (65536 doubles = 512 KB)
+        tracing::info!("Loading qHash lookup table (512 KB)...");
+        let lookup_table_bytes = include_bytes!("qhash_lookup_table.bin");
+        
+        // Convert bytes to f64 array (65536 entries)
+        const LOOKUP_SIZE: usize = 65536;
+        let mut lookup_table = vec![0.0f64; LOOKUP_SIZE];
+        
+        for i in 0..LOOKUP_SIZE {
+            let offset = i * 8;
+            let bytes = [
+                lookup_table_bytes[offset],
+                lookup_table_bytes[offset + 1],
+                lookup_table_bytes[offset + 2],
+                lookup_table_bytes[offset + 3],
+                lookup_table_bytes[offset + 4],
+                lookup_table_bytes[offset + 5],
+                lookup_table_bytes[offset + 6],
+                lookup_table_bytes[offset + 7],
+            ];
+            lookup_table[i] = f64::from_le_bytes(bytes);
+        }
+        
+        // Upload lookup table to GPU (passed as kernel parameter)
+        let d_lookup_table = device.htod_copy(lookup_table)?;
+        
+        tracing::info!("CUDA miner initialized successfully with analytical QHash approximation");
         
         Ok(Self {
             device,
             func,
+            d_lookup_table,
             last_kernel_ms: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -104,17 +132,8 @@ impl CudaMiner {
         
         // Launch configuration - testing for occupancy optimization
         // Baseline (Phase 1): 128 threads/block (12.5% occupancy, 37 MH/s, 400ms kernel)
-        // Testing range: 64, 96, 128, 192, 256, 384, 512
-        // Goal: Find optimal threads_per_block for GTX 1660 SUPER (CC 7.5)
         let threads_per_block = 256;
         let num_blocks = (num_nonces + threads_per_block - 1) / threads_per_block;
-        
-        tracing::debug!(
-            "Launching kernel: {} blocks x {} threads = {} nonces",
-            num_blocks,
-            threads_per_block,
-            num_nonces
-        );
         
         // Launch kernel with optimized shared memory (minimal usage)
         let cfg = LaunchConfig {
@@ -130,11 +149,12 @@ impl CudaMiner {
                     (
                         &d_header,
                         ntime,
-                        start_nonce,
                         &d_target,
+                        start_nonce,
+                        num_nonces,
                         &d_solution,
                         &d_found_hash,
-                        num_nonces,
+                        &self.d_lookup_table,  // Pass lookup table pointer
                     ),
                 )
                 .map_err(|e| anyhow!("Kernel launch failed: {}", e))?;
@@ -143,8 +163,6 @@ impl CudaMiner {
         // Non-blocking driver polling with adaptive sleep (host thread, not async)
         let stream = *self.device.cu_stream();
         let poll_start = std::time::Instant::now();
-        let mut poll_iterations = 0u32;
-        tracing::debug!("GPU poll start: nonces={}", num_nonces);
         loop {
             let result = unsafe { lib().cuStreamQuery(stream) };
             match result {
@@ -152,13 +170,9 @@ impl CudaMiner {
                     let elapsed = poll_start.elapsed();
                     let ms = (elapsed.as_secs_f64() * 1000.0) as u64;
                     self.last_kernel_ms.store(ms, Ordering::Relaxed);
-                    let hashrate_mh_s = (num_nonces as f64 / 1_000_000.0) / (ms as f64 / 1000.0);
-                    tracing::debug!("⚙️  Kernel execution: {}ms | {} nonces | {:.1} MH/s | {} polls", 
-                        ms, num_nonces, hashrate_mh_s, poll_iterations);
                     break;
                 }
                 CUresult::CUDA_ERROR_NOT_READY => {
-                    poll_iterations += 1;
                     // Aim ~16 polls per kernel, clamp range
                     let last = self.last_kernel_ms.load(Ordering::Relaxed);
                     let interval_ms = if last == 0 { 8 } else { (last / 16).clamp(2, 40) };

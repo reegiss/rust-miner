@@ -209,15 +209,22 @@ async fn main() -> Result<()> {
     let shutdown_clone = shutdown.clone();
     
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.ok();
-        shutdown_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+        match tokio::signal::ctrl_c().await {
+            Ok(()) => {
+                println!("\n{}", "⚠️  Interrupt signal received, shutting down...".yellow().bold());
+                shutdown_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            Err(err) => {
+                eprintln!("Unable to listen for shutdown signal: {}", err);
+            }
+        }
     });
     
     // Main mining loop - wait for jobs
     let mut job_count = 0;
     loop {
-        // Check for shutdown
-        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+        // Check for shutdown (strong ordering)
+        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
             println!("\n{}", "Shutting down miner...".yellow());
             
             // Final statistics
@@ -231,12 +238,25 @@ async fn main() -> Result<()> {
         }
         
         tokio::select! {
-            Some(job) = stratum_client.get_job() => {
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                // Periodic check to allow shutdown signal to be processed
+                continue;
+            }
+            Some(mut job) = stratum_client.get_job() => {
                 job_count += 1;
                 println!("\n{} {}", 
                     "📋 Job".cyan().bold(),
                     format!("#{} (ID: {})", job_count, job.job_id).bright_white()
                 );
+
+                // Calculate effective ntime: do not go backwards vs job.ntime, but allow current time
+                let job_ntime_u32 = u32::from_str_radix(&job.ntime, 16).unwrap_or(0);
+                let now = chrono::Utc::now().timestamp() as u32;
+                let effective_ntime = std::cmp::max(job_ntime_u32, now);
+                let effective_ntime_hex = format!("{:08x}", effective_ntime);
+
+                // Update job.ntime locally so backend and submit_share see the same value
+                job.ntime = effective_ntime_hex.clone();
 
                 // Get extranonce1 from client
                 let extranonce1 = match stratum_client.get_extranonce1().await {
@@ -267,11 +287,13 @@ async fn main() -> Result<()> {
                     let chunk_size = 50_000_000u32; // initial 50M nonces (~>500ms target)
                     let mut current_nonce = 0u32;
                     let mut found_share = None;
-                    let mut iterations = 0u32;
+                    // Periodic UI stats print timer
+                    let mut last_stats_print = std::time::Instant::now();
                     
                     'gpu_mining: loop {
-                        // Check for shutdown signal
-                        if shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        // Check for shutdown signal (strong ordering)
+                        if shutdown.load(std::sync::atomic::Ordering::SeqCst) {
+                            println!("   {}", "🛑 Shutdown requested, stopping mining...".yellow());
                             break 'gpu_mining;
                         }
                         
@@ -317,65 +339,46 @@ async fn main() -> Result<()> {
                                 }
                                 
                                 // No share found this chunk, continue
-                                iterations += 1;
                                 
-                                // Adaptive chunk sizing based on last kernel duration
-                                // DISABLED FOR NOW: Testing with fixed 50M nonces
-                                // if let Some(ms) = Some(backend_clone.last_kernel_ms()) {
-                                //     if ms > 0 {
-                                //         // Target window ~700-900ms
-                                //         if ms < 400 && chunk_size < 150_000_000 {
-                                //             // Increase by 25%
-                                //             chunk_size = (chunk_size as f64 * 1.25) as u32;
-                                //         } else if ms > 1200 && chunk_size > 5_000_000 {
-                                //             // Decrease by 20%
-                                //             chunk_size = (chunk_size as f64 * 0.80) as u32;
-                                //         }
-                                //     }
-                                // }
-
-                                // Print hashrate & tuning info every 100 iterations (less frequently)
-                                if iterations % 100 == 0 {
+                                // Record hashrate sample for UI (every iteration)
+                                let kernel_ms = backend_clone.lock().await.last_kernel_ms();
+                                if kernel_ms > 0 {
+                                    let sample = (chunk_size as f64) / (kernel_ms as f64 / 1000.0);
+                                    hr_window.push_back(sample);
+                                    if hr_window.len() > HR_WINDOW_SIZE {
+                                        hr_window.pop_front();
+                                    }
+                                }
+                                
+                                // Record a sample for more detailed windows (sample = num_hashes)
+                                hr_history.push_back((std::time::Instant::now(), num_hashes));
+                                // Discard samples older than 15 minutes to bound memory
+                                while let Some((t, _)) = hr_history.front() {
+                                    if t.elapsed() > Duration::from_secs(15 * 60) {
+                                        hr_history.pop_front();
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                // Print hashrate & tuning info roughly every second
+                                if last_stats_print.elapsed() >= Duration::from_secs(1) {
+                                    last_stats_print = std::time::Instant::now();
                                     let elapsed = start_time.elapsed();
                                     if elapsed.as_secs() > 0 {
                                         let hashrate = stats.hashes as f64 / elapsed.as_secs_f64();
-                                        // Compute recent moving-average based on last kernel samples
-                                        let kernel_ms = backend_clone.blocking_lock().last_kernel_ms();
-                                        if kernel_ms > 0 {
-                                            let sample = (chunk_size as f64) / (kernel_ms as f64 / 1000.0);
-                                            hr_window.push_back(sample);
-                                            if hr_window.len() > HR_WINDOW_SIZE {
-                                                hr_window.pop_front();
-                                            }
-                                        }
-
-                                        // Record a sample for more detailed windows (sample = num_hashes)
-                                        hr_history.push_back((std::time::Instant::now(), num_hashes));
-                                        // Discard samples older than 15 minutes to bound memory
-                                        while let Some((t, _)) = hr_history.front() {
-                                            if t.elapsed() > Duration::from_secs(15 * 60) {
-                                                hr_history.pop_front();
-                                            } else {
-                                                break;
-                                            }
-                                        }
-
-                                        // Compute average of samples if available, otherwise use cumulative rate
-                                        let _recent_avg = if !hr_window.is_empty() {
+                                        let avg_sample = if !hr_window.is_empty() {
                                             hr_window.iter().copied().sum::<f64>() / hr_window.len() as f64
-                                        } else {
-                                            hashrate
-                                        };
-
-                                        // Simplified log: only MH/s and kernel latency
+                                        } else { hashrate };
                                         tracing::info!(
-                                            "GPU: {:.2} MH/s | last_kernel={}ms",
+                                            "GPU: {:.2} MH/s (avg {:.2} MH/s window {}) | last_kernel={}ms",
                                             hashrate / 1_000_000.0,
+                                            avg_sample / 1_000_000.0,
+                                            hr_window.len(),
                                             kernel_ms
                                         );
                                     }
-                                        // Also print a WildRig-like statistics block every time we log
-                                        print_wildrig_stats(&backend_clone, &hr_history, &stats).await?;
+                                    // Update console stats view
+                                    print_wildrig_stats(&backend_clone, &hr_history, &stats).await?;
                                 }
                                 
                                 // Check for new job AFTER batch completes (not during)
@@ -415,10 +418,18 @@ async fn main() -> Result<()> {
                             println!("   {} {:.2}s", "Time:".green(), elapsed.as_secs_f64());
                             
                             // Submit share to pool
-                            println!("   {} Submitting share...", "📤".yellow());
-                            
                             let extranonce2_hex = hex::encode(&extranonce2);
                             let nonce_hex = format!("{:08x}", nonce);
+
+                            tracing::info!(
+                                "Submitting share to pool: job_id={} extranonce2={} ntime={} nonce={}",
+                                job.job_id,
+                                extranonce2_hex,
+                                job.ntime,
+                                nonce_hex,
+                            );
+
+                            println!("   {} Submitting share...", "📤".yellow());
                             
                             match stratum_client.submit_share(
                                 &job.job_id,
@@ -450,14 +461,6 @@ async fn main() -> Result<()> {
                             }
                 } else {
                     // No share found
-                    let elapsed = start_time.elapsed();
-                    let hashrate = if elapsed.as_secs() > 0 {
-                        stats.hashes as f64 / elapsed.as_secs_f64()
-                    } else {
-                        0.0
-                    };
-                    
-                    tracing::debug!("No share found | {:.2} MH/s (GPU)", hashrate / 1_000_000.0);
                 }
                 
                 // Display statistics every 5 jobs
@@ -552,12 +555,27 @@ async fn print_wildrig_stats(backend: &std::sync::Arc<tokio::sync::Mutex<Box<dyn
     let now = std::time::Instant::now();
     let rate_for = |secs: u64| -> f64 {
         let window = Duration::from_secs(secs);
-        let sum: u64 = hr_history
+        let samples: Vec<_> = hr_history
             .iter()
             .filter(|(t, _)| now.duration_since(*t) <= window)
-            .map(|(_, n)| *n)
-            .sum();
-        sum as f64 / window.as_secs_f64()
+            .collect();
+        
+        if samples.is_empty() {
+            return 0.0;
+        }
+        
+        // Calculate the actual time span of samples in the window
+        let earliest = samples.iter().map(|(t, _)| *t).min().unwrap();
+        let latest = samples.iter().map(|(t, _)| *t).max().unwrap();
+        let actual_span = latest.duration_since(earliest);
+        
+        // If span is too small, use the full window duration to avoid division by zero
+        let span_secs = if actual_span.as_secs_f64() > 0.1 { actual_span.as_secs_f64() } else { window.as_secs_f64() };
+        
+        let sum: u64 = samples.iter().map(|(_, n)| *n).sum();
+        let rate = sum as f64 / span_secs;
+        
+        rate
     };
 
     let rate10 = rate_for(10);

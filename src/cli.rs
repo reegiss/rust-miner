@@ -72,8 +72,6 @@ pub fn display_banner() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_args_parsing() {
         // This would normally use clap's testing utilities

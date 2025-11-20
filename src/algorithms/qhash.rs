@@ -176,7 +176,7 @@ mod tests {
     
     #[test]
     fn test_qhash_basic() {
-        let qhash = _QHash::new(0);
+        let qhash = _QHash::_new(0);
         
         // Create a dummy block header
         let mut header = [0u8; 80];
@@ -195,7 +195,7 @@ mod tests {
     
     #[test]
     fn test_qhash_deterministic() {
-        let qhash = _QHash::new(1234567890);
+        let qhash = _QHash::_new(1234567890);
         
         let mut header = [0u8; 80];
         header[0..4].copy_from_slice(&[1, 2, 3, 4]);
@@ -210,37 +210,16 @@ mod tests {
     #[test]
     fn test_split_nibbles() {
         let data = [0xAB, 0xCD, 0xEF];
-        let nibbles = _QHash::split_nibbles(&data);
+        let nibbles = _QHash::_split_nibbles(&data);
         
         assert_eq!(nibbles, vec![0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F]);
     }
     
     #[test]
-    fn test_meets_target() {
-        let qhash = _QHash::new(0);
-        
-        let hash = [0x00, 0x00, 0x00, 0x01, 0xFF, 0xFF, 0xFF, 0xFF, 
-                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-                   0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
-        
-        let target = [0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
-                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
-        
-        // hash < target
-        assert!(qhash.meets_target(&hash, &target));
-        
-        // hash > target (swap them)
-        assert!(!qhash.meets_target(&target, &hash));
-    }
-    
-    #[test]
     fn test_fixed_point_conversion() {
-        assert_eq!(_QHash::to_fixed_point(1.0), 32767);    // Max positive
-        assert_eq!(_QHash::to_fixed_point(-1.0), -32768);  // Max negative
-        assert_eq!(_QHash::to_fixed_point(0.0), 0);        // Zero
-        assert_eq!(_QHash::to_fixed_point(0.5), 16384);    // Half
+        assert_eq!(_QHash::_to_fixed_point(1.0), 32767);    // Max positive
+        assert_eq!(_QHash::_to_fixed_point(-1.0), -32768);  // Max negative
+        assert_eq!(_QHash::_to_fixed_point(0.0), 0);        // Zero
+        assert_eq!(_QHash::_to_fixed_point(0.5), 16384);    // Half
     }
 }

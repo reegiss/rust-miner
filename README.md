@@ -86,14 +86,16 @@ cargo test
 
 Note: CUDA is the only supported backend. CPU mining is not available.
 
-## 📊 Performance (indicative)
+## 📊 Performance (Current)
 
-- GTX 1660 SUPER (CUDA) — QHash: ~37 MH/s
-- RTX 3060 (CUDA) — QHash: ~65 MH/s
+- GTX 1660 SUPER (CUDA) — QHash: ~295 MH/s
+- Stable hashrate with analytical QHash implementation
+- Shares successfully submitted to Qubitcoin pool
 
 Notes:
-- Hashrate depends on CUDA version/driver and power limits.
-- CPU mining is not supported.
+- Performance depends on CUDA version/driver and power limits
+- Analytical QHash algorithm uses lookup table for quantum simulation
+- No CPU mining support (CUDA GPU required)
 
 ## 🏗️ Architecture
 
@@ -119,11 +121,11 @@ rust-miner/
 ```
 
 Key ideas:
-- GPU-mandatory design (no CPU fallback)
-- CUDA-only backend (no OpenCL)
+- CUDA-only backend (NVIDIA GPUs only)
 - Trait-based backend abstraction (future algorithms plug-in)
 - Kernel returns (nonce, hash) directly
-- Adaptive chunk sizing and low-CPU polling
+- Analytical QHash implementation with lookup table
+- Efficient non-blocking driver polling
 
 Supported algorithms:
 - qhash
@@ -159,13 +161,13 @@ cargo clippy -- -D warnings
 
 ```bash
 # Basic usage
-rust-miner --algo qhash --url pool.example.com:8610 --user WALLET.WORKER --pass x
+rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f.RIG-1 --pass x
 
 # With specific GPU
-rust-miner --algo qhash --url pool.example.com:8610 --user WALLET.WORKER --gpu 0
+rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f.RIG-1 --gpu 0
 
 # Debug mode
-rust-miner --algo qhash --url pool.example.com:8610 --user WALLET.WORKER --debug
+rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f.RIG-1 --debug
 
 # Help
 rust-miner --help

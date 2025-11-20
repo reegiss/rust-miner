@@ -26,8 +26,16 @@ pub struct StratumConfig {
 
 impl StratumConfig {
     pub fn new(url: String, username: String, password: String) -> Self {
+        // Strip protocol prefix if present (stratum+tcp://, stratum://, tcp://)
+        let cleaned_url = url
+            .strip_prefix("stratum+tcp://")
+            .or_else(|| url.strip_prefix("stratum://"))
+            .or_else(|| url.strip_prefix("tcp://"))
+            .unwrap_or(&url)
+            .to_string();
+        
         Self {
-            url,
+            url: cleaned_url,
             username,
             password,
             user_agent: format!("rust-miner/{}", env!("CARGO_PKG_VERSION")),
@@ -101,7 +109,7 @@ impl StratumClient {
         let response_sender = self.response_sender.clone();
         let pool_url = self.config.url.clone();
         
-        tokio::spawn(async move {
+    tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
             
@@ -117,8 +125,6 @@ impl StratumClient {
                         if line.is_empty() {
                             continue;
                         }
-                        
-                        tracing::debug!("Received: {}", line);
                         
                         match serde_json::from_str::<StratumResponse>(line) {
                             Ok(response) => {
@@ -195,8 +201,6 @@ impl StratumClient {
     /// Send a request and wait for response
     async fn send_request(&self, request: StratumRequest) -> StratumResult<StratumResponse> {
         let json_line = request.to_json_line()?;
-        
-        tracing::debug!("Sending: {}", json_line.trim());
         
         // Write request
         {
@@ -298,7 +302,7 @@ impl StratumClient {
             ntime,
             nonce,
         );
-        
+
         let response = self.send_request(request).await?;
         
         let accepted = response.result
@@ -307,9 +311,9 @@ impl StratumClient {
             .unwrap_or(false);
         
         if accepted {
-            tracing::info!("Share accepted!");
+            tracing::info!("Share accepted by pool");
         } else {
-            tracing::warn!("Share rejected");
+            tracing::warn!("Share rejected by pool: result={:?} error={:?}", response.result, response.error);
         }
         
         Ok(accepted)

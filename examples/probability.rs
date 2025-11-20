@@ -2,10 +2,10 @@ fn main() {
     // Difficulty calculation for cryptocurrency mining
     
     // Target for difficulty 1 (maximum target)
-    let target_1_hex = "00000000FFFF0000000000000000000000000000000000000000000000000000";
+    let _target_1_hex = "00000000FFFF0000000000000000000000000000000000000000000000000000";
     
     // Target for difficulty 5
-    let target_5_hex = "000000000000024c620000000000000000000000000000000000000000000000";
+    let _target_5_hex = "000000000000024c620000000000000000000000000000000000000000000000";
     
     // Convert to numbers for calculation
     // target_1 = 0x00000000FFFF000000...
@@ -41,8 +41,8 @@ fn main() {
     }
     
     // Calculate how many hashes we did
-    let hashes_done = 3_450_000_000.0;
-    let probability_at_least_one = 1.0 - (1.0 - prob).powf(hashes_done);
+    let hashes_done: f64 = 3_450_000_000.0;
+    let probability_at_least_one = 1.0f64 - f64::powf(1.0f64 - prob, hashes_done);
     
     println!("\nWith {} billion hashes:", hashes_done / 1e9);
     println!("  Probability of finding at least one share: {:.2}%", 

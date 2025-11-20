@@ -255,9 +255,9 @@ impl StratumJob {
             // Simplified calculation - actual difficulty would be much more complex
             (0xFFFF as f64 / mantissa) * 2.0f64.powf(32.0 - exponent)
         } else {
-            21.48 // fallback to a typical Qubitcoin difficulty
+            0.0
         };
-        
+
         Ok(Self {
             job_id,
             prevhash,

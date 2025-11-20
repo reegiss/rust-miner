@@ -10,11 +10,11 @@ fn test_target_calculation() {
     println!("nbits: 0x{:08x}", nbits);
     println!("target bytes: {}", hex::encode(&target));
     
-    // Expected format for big-endian target:
+    // Our nbits_to_target returns little-endian bytes (like Bitcoin's arith_uint256).
     // exponent = 0x1a = 26
     // mantissa = 0x020bcf
-    // offset = 32 - 26 = 6
-    // So: [0, 0, 0, 0, 0, 0, 2, b, c, f, 0, 0, ...]
+    // offset = exponent - 3 = 23
+    // So: bytes 23..=25 contain [0xcf, 0x0b, 0x02] (little-endian mantissa)
     
     let exponent = (nbits >> 24) as usize;
     let mantissa = nbits & 0x00FFFFFF;
@@ -23,13 +23,12 @@ fn test_target_calculation() {
     println!("mantissa: 0x{:06x}", mantissa);
     
     // Manual calculation
-    let offset = 32 - exponent;
+    let offset = exponent - 3;
     println!("offset: {}", offset);
-    println!("target[{}] should be: 0x{:02x}", offset, (mantissa >> 16) as u8);
-    println!("target[{}] should be: 0x{:02x}", offset + 1, (mantissa >> 8) as u8);
-    println!("target[{}] should be: 0x{:02x}", offset + 2, mantissa as u8);
-    
-    // Print target with indices
+    println!("target[{}] should be: 0x{:02x}", offset, (mantissa & 0xFF) as u8);
+    println!("target[{}] should be: 0x{:02x}", offset + 1, ((mantissa >> 8) & 0xFF) as u8);
+    println!("target[{}] should be: 0x{:02x}", offset + 2, ((mantissa >> 16) & 0xFF) as u8);
+
     for (i, &byte) in target.iter().enumerate() {
         if i == offset || i == offset + 1 || i == offset + 2 {
             println!("target[{}]: 0x{:02x} ***", i, byte);
@@ -37,11 +36,10 @@ fn test_target_calculation() {
             println!("target[{}]: 0x{:02x}", i, byte);
         }
     }
-    
-    // Verify the calculation
-    assert_eq!(target[offset], (mantissa >> 16) as u8);
-    assert_eq!(target[offset + 1], (mantissa >> 8) as u8);
-    assert_eq!(target[offset + 2], mantissa as u8);
+
+    assert_eq!(target[offset], (mantissa & 0xFF) as u8);
+    assert_eq!(target[offset + 1], ((mantissa >> 8) & 0xFF) as u8);
+    assert_eq!(target[offset + 2], ((mantissa >> 16) & 0xFF) as u8);
 }
 
 #[test]
@@ -71,39 +69,33 @@ fn test_hash_vs_target_comparison() {
     
     println!("\n=== Hash Comparison ===");
     println!("target: {}", hex::encode(&target));
-    
-    // Create a test hash that is less than target (should be valid)
-    // Target is: 000000000000020bcf00...
-    // Valid hash: 000000000000020bce00... (< target at byte 8)
-    let mut valid_hash = [0u8; 32];
-    valid_hash[6] = 0x02;
-    valid_hash[7] = 0x0b;
-    valid_hash[8] = 0xce; // < 0xcf at position 8
+
+    let mut valid_hash = target;
+    if valid_hash[25] > 0 {
+        valid_hash[25] -= 1;
+    } else {
+        valid_hash[24] = valid_hash[24].saturating_sub(1);
+    }
     println!("valid_hash (should be < target): {}", hex::encode(&valid_hash));
-    
-    // Create a test hash that is greater than target (should be invalid)
-    // Invalid hash: 000000000000020bd000... (> target at byte 8)
-    let mut invalid_hash = [0u8; 32];
-    invalid_hash[6] = 0x02;
-    invalid_hash[7] = 0x0b;
-    invalid_hash[8] = 0xd0; // > 0xcf at position 8
+
+    let mut invalid_hash = target;
+    invalid_hash[25] = invalid_hash[25].saturating_add(1);
     println!("invalid_hash (should be > target): {}", hex::encode(&invalid_hash));
-    
-    // Big-endian comparison logic (as in kernel)
+
     let mut valid_meets_target = true;
-    for i in 0..32 {
+    for i in (0..32).rev() {
         if valid_hash[i] < target[i] {
-            break; // hash < target, valid!
+            break;
         } else if valid_hash[i] > target[i] {
             valid_meets_target = false;
             break;
         }
     }
-    
+
     let mut invalid_meets_target = true;
-    for i in 0..32 {
+    for i in (0..32).rev() {
         if invalid_hash[i] < target[i] {
-            break; // hash < target, valid!
+            break;
         } else if invalid_hash[i] > target[i] {
             invalid_meets_target = false;
             break;
