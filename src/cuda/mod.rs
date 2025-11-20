@@ -152,8 +152,9 @@ impl CudaMiner {
                     let elapsed = poll_start.elapsed();
                     let ms = (elapsed.as_secs_f64() * 1000.0) as u64;
                     self.last_kernel_ms.store(ms, Ordering::Relaxed);
-                    let hashrate_mb_s = (num_nonces as f64 / 1_000_000.0) / (ms as f64 / 1000.0);
-                    tracing::info!("GPU poll done: iters={} elapsed_ms={} batch_nonces={} estimated_MH/s={:.1}", poll_iterations, ms, num_nonces, hashrate_mb_s);
+                    let hashrate_mh_s = (num_nonces as f64 / 1_000_000.0) / (ms as f64 / 1000.0);
+                    tracing::debug!("⚙️  Kernel execution: {}ms | {} nonces | {:.1} MH/s | {} polls", 
+                        ms, num_nonces, hashrate_mh_s, poll_iterations);
                     break;
                 }
                 CUresult::CUDA_ERROR_NOT_READY => {

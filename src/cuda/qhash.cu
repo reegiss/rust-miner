@@ -432,19 +432,20 @@ extern "C" __global__ void qhash_mine(
     }
     
     const int total_bytes = 32;
-    bool should_reject = (zero_count == total_bytes && ntime >= 1753105444) ||
-                        (zero_count >= (total_bytes * 3 / 4) && ntime >= 1753305380) ||
-                        (zero_count >= (total_bytes / 4) && ntime >= 1754220531);
+    // TEMPORARILY DISABLED FOR DEBUG: Rejection logic causing all blocks to be rejected
+    // bool should_reject = (zero_count == total_bytes && ntime >= 1753105444) ||
+    //                     (zero_count >= (total_bytes * 3 / 4) && ntime >= 1753305380) ||
+    //                     (zero_count >= (total_bytes / 4) && ntime >= 1754220531);
+    //
+    // // Early exit for rejected blocks
+    // if (should_reject) {
+    //     return;
+    // }
     
-    // Early exit for rejected blocks
-    if (should_reject) {
-        return;
-    }
-    
-    // Check if hash meets target (big-endian comparison) - optimized
+    // Check if hash meets target (little-endian comparison for QHash)
     bool meets_target = true;
     #pragma unroll
-    for (int i = 0; i < 32; i++) {
+    for (int i = 31; i >= 0; i--) {  // Compare from END (little-endian)
         if (final_hash[i] < shared_target[i]) {
             break; // hash < target, valid!
         } else if (final_hash[i] > shared_target[i]) {
