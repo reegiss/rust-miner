@@ -2,7 +2,6 @@
 /// 
 /// This module wraps CudaMiner to implement the MiningBackend trait,
 /// enabling dynamic algorithm dispatch.
-
 use anyhow::Result;
 use crate::backend::{MiningBackend, MiningResult, GpuInfo};
 use crate::stratum::StratumJob;
@@ -92,17 +91,25 @@ impl MiningBackend for QHashCudaBackend {
             nonce: result.as_ref().map(|(n, _)| *n),
             hash: result.as_ref().map(|(_, h)| Box::new(*h)),
             hashes_computed: (num_nonces as u64),
-            kernel_time_ms: self.last_kernel_ms() as u32,
         })
     }
     
     fn device_info(&self) -> Result<GpuInfo> {
+        let device_name = self.miner.device_name()?;
+        let compute_capability = self.miner.compute_capability()?;
+        
+        // TODO: Query actual device memory and clock info from CUDA
+        // For now, use placeholder values
+        let memory_mb = 8192; // Placeholder: typical RTX GPU VRAM
+        let compute_units = 128; // Placeholder: typical CU count
+        let clock_mhz = 1500; // Placeholder: typical boost clock
+        
         Ok(GpuInfo {
-            name: self.miner.device_name()?,
-            compute_capability: self.miner.compute_capability()?,
-            memory_mb: 0, // TODO: query from CUDA
-            compute_units: 0, // TODO: query from CUDA
-            clock_mhz: 0, // TODO: query from CUDA
+            name: device_name,
+            compute_capability,
+            memory_mb,
+            compute_units,
+            clock_mhz,
         })
     }
     

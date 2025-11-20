@@ -1,7 +1,11 @@
 /// CUDA mining implementation
 mod qhash_backend;
+mod ethash_backend;
+mod ethash_miner;
 
 pub use qhash_backend::QHashCudaBackend;
+pub use ethash_backend::EthashCudaBackend;
+pub use ethash_miner::EthashCudaMiner;
 
 use anyhow::{anyhow, Result};
 use cudarc::driver::*;
@@ -46,11 +50,9 @@ pub fn set_cuda_device(device_index: usize) -> Result<()> {
 fn compile_optimized_kernel() -> Result<cudarc::nvrtc::Ptx> {
     // Current limitation: cudarc 0.11's compile_ptx doesn't support options.
     // Using default compilation which applies O2 level optimization.
-    // TODO: Move to nvrtc_sys to enable -O3, --use_fast_math flags.
+    // TODO (future): Move to nvrtc_sys to enable -O3, --use_fast_math flags for even better performance.
     
-    tracing::info!(
-        "Compiling CUDA kernel (compiled with O2; TODO: enable -O3, --use_fast_math, --gpu-architecture=compute_75)"
-    );
+    tracing::info!("Compiling CUDA kernel (O2 optimization)");
     
     cudarc::nvrtc::compile_ptx(CUDA_KERNEL_SRC)
         .map_err(|e| anyhow!("Failed to compile CUDA kernel: {}", e))
@@ -94,8 +96,8 @@ impl CudaMiner {
         // Convert bytes to f64 array (65536 entries)
         const LOOKUP_SIZE: usize = 65536;
         let mut lookup_table = vec![0.0f64; LOOKUP_SIZE];
-        
-        for i in 0..LOOKUP_SIZE {
+
+        for (i, slot) in lookup_table.iter_mut().enumerate().take(LOOKUP_SIZE) {
             let offset = i * 8;
             let bytes = [
                 lookup_table_bytes[offset],
@@ -107,7 +109,7 @@ impl CudaMiner {
                 lookup_table_bytes[offset + 6],
                 lookup_table_bytes[offset + 7],
             ];
-            lookup_table[i] = f64::from_le_bytes(bytes);
+            *slot = f64::from_le_bytes(bytes);
         }
         
         // Upload lookup table to GPU (passed as kernel parameter)
@@ -148,8 +150,8 @@ impl CudaMiner {
         
         // Launch configuration - testing for occupancy optimization
         // Baseline (Phase 1): 128 threads/block (12.5% occupancy, 37 MH/s, 400ms kernel)
-        let threads_per_block = 256;
-        let num_blocks = (num_nonces + threads_per_block - 1) / threads_per_block;
+    let threads_per_block: u32 = 256;
+    let num_blocks = num_nonces.div_ceil(threads_per_block);
         
         // Launch kernel with optimized shared memory (minimal usage)
         let cfg = LaunchConfig {
@@ -246,7 +248,7 @@ mod tests {
     #[test]
     #[ignore] // Requires CUDA hardware
     fn test_cuda_miner_init() {
-        let miner = CudaMiner::new();
+        let miner = CudaMiner::new(0);
         assert!(miner.is_ok(), "Failed to initialize CUDA miner");
     }
 }

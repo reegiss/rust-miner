@@ -141,6 +141,10 @@ pub struct StratumResponse {
     /// For mining.notify (no id)
     pub method: Option<String>,
     pub params: Option<Vec<Value>>,
+
+    /// Some pools send extra top-level fields with notifications (e.g., height, algo)
+    #[serde(flatten)]
+    pub extra: std::collections::BTreeMap<String, Value>,
 }
 
 impl StratumResponse {
@@ -163,25 +167,25 @@ pub struct StratumJob {
     /// Job ID
     pub job_id: String,
     
-    /// Previous block hash
+    /// Previous block hash (Bitcoin/Qubitcoin)
     pub prevhash: String,
     
-    /// Coinbase part 1
+    /// Coinbase part 1 (Bitcoin/Qubitcoin)
     pub coinb1: String,
     
-    /// Coinbase part 2
+    /// Coinbase part 2 (Bitcoin/Qubitcoin)
     pub coinb2: String,
     
-    /// Merkle branches
+    /// Merkle branches (Bitcoin/Qubitcoin)
     pub merkle_branch: Vec<String>,
     
-    /// Block version
+    /// Block version (Bitcoin/Qubitcoin)
     pub version: String,
     
-    /// Network difficulty bits
+    /// Network difficulty bits (Bitcoin/Qubitcoin)
     pub nbits: String,
     
-    /// Network time
+    /// Network time (Bitcoin/Qubitcoin)
     pub ntime: String,
     
     /// Clean jobs flag (true = discard old jobs)
@@ -189,11 +193,70 @@ pub struct StratumJob {
     
     /// Calculated difficulty
     pub difficulty: f64,
+
+    /// Seed Hash (Ethash)
+    pub seed_hash: Option<String>,
+
+    /// Header Hash (Ethash)
+    pub header_hash: Option<String>,
+
+    /// Optional extra fields from pool
+    pub height: Option<u64>,
+    pub algo: Option<String>,
 }
 
 impl StratumJob {
     /// Parse from mining.notify params
     pub fn from_params(params: &[Value]) -> StratumResult<Self> {
+        // Check for Ethash format (Stratum V1 for Ethereum/ETC)
+        // Format 1: [job_id, seed_hash, header_hash, clean_jobs]
+        // Format 2: [job_id, seed_hash, header_hash, target, clean_jobs] (2Miners ETC)
+        if params.len() == 4 || params.len() == 5 {
+             let job_id = params[0]
+                .as_str()
+                .ok_or_else(|| StratumError::InvalidResponse("job_id not a string".to_string()))?
+                .to_string();
+            
+            let seed_hash = params[1]
+                .as_str()
+                .ok_or_else(|| StratumError::InvalidResponse("seed_hash not a string".to_string()))?
+                .to_string();
+            
+            let header_hash = params[2]
+                .as_str()
+                .ok_or_else(|| StratumError::InvalidResponse("header_hash not a string".to_string()))?
+                .to_string();
+            
+            // Handle optional target (index 3) and clean_jobs (last index)
+            let clean_jobs_idx = params.len() - 1;
+            let clean_jobs = params[clean_jobs_idx]
+                .as_bool()
+                .ok_or_else(|| StratumError::InvalidResponse("clean_jobs not a boolean".to_string()))?;
+
+            // If we have 5 params, the 4th one (index 3) is the target
+            let difficulty = 1.0;
+            if params.len() == 5 {
+                // Optional target (params[3]) present; for now we ignore and keep difficulty as-is.
+            }
+
+            return Ok(Self {
+                job_id,
+                prevhash: String::new(),
+                coinb1: String::new(),
+                coinb2: String::new(),
+                merkle_branch: Vec::new(),
+                version: String::new(),
+                nbits: String::new(),
+                ntime: String::new(),
+                clean_jobs,
+                difficulty, 
+                seed_hash: Some(seed_hash),
+                header_hash: Some(header_hash),
+                height: None,
+                algo: None,
+            });
+        }
+
         if params.len() < 9 {
             return Err(StratumError::InvalidResponse(
                 format!("Invalid mining.notify params length: {}", params.len())
@@ -269,6 +332,10 @@ impl StratumJob {
             ntime,
             clean_jobs,
             difficulty,
+            seed_hash: None,
+            header_hash: None,
+            height: None,
+            algo: None,
         })
     }
 }
@@ -290,5 +357,42 @@ mod tests {
         let req = StratumRequest::authorize(2, "wallet.worker", "x");
         assert_eq!(req.method, "mining.authorize");
         assert_eq!(req.params.len(), 2);
+    }
+
+    #[test]
+    fn test_qhash_job_parsing() {
+        // Standard Bitcoin/QHash mining.notify params (9 items)
+        let params = vec![
+            Value::String("job_id".to_string()),
+            Value::String("prevhash".to_string()),
+            Value::String("coinb1".to_string()),
+            Value::String("coinb2".to_string()),
+            Value::Array(vec![]), // merkle_branch
+            Value::String("version".to_string()),
+            Value::String("nbits".to_string()),
+            Value::String("ntime".to_string()),
+            Value::Bool(true), // clean_jobs
+        ];
+        
+        let job = StratumJob::from_params(&params).unwrap();
+        assert_eq!(job.job_id, "job_id");
+        assert!(job.seed_hash.is_none());
+        assert!(job.header_hash.is_none());
+    }
+
+    #[test]
+    fn test_ethash_job_parsing() {
+        // Ethash mining.notify params (4 items)
+        let params = vec![
+            Value::String("job_id".to_string()),
+            Value::String("seed_hash".to_string()),
+            Value::String("header_hash".to_string()),
+            Value::Bool(true),
+        ];
+        
+        let job = StratumJob::from_params(&params).unwrap();
+        assert_eq!(job.job_id, "job_id");
+        assert_eq!(job.seed_hash.unwrap(), "seed_hash");
+        assert_eq!(job.header_hash.unwrap(), "header_hash");
     }
 }

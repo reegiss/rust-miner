@@ -15,14 +15,73 @@ use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus, GpuDevice};
 use mining::MiningStats;
 use stratum::{StratumClient, StratumConfig};
+use rust_miner::ethash::dag as ethdag;
 use std::collections::VecDeque;
 use std::process::Command;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-// CPU fallback removed by design. This miner requires a compatible GPU.
+/// Efficient moving average calculator for different time windows
+#[derive(Debug, Clone)]
+pub struct MovingAverage {
+    samples: VecDeque<(std::time::Instant, f64)>,
+    max_samples: usize,
+}
 
-/// Statistics for a single GPU
+impl MovingAverage {
+    fn new() -> Self {
+        Self {
+            samples: VecDeque::new(),
+            max_samples: 1000, // Keep more samples for better windowing
+        }
+    }
+
+    /// Update moving averages with new hashrate sample
+    fn update(&mut self, current_hashrate: f64) {
+        let now = std::time::Instant::now();
+        self.samples.push_back((now, current_hashrate));
+        
+        // Remove old samples beyond 1 hour to prevent unbounded memory growth
+        let one_hour_ago = now - std::time::Duration::from_secs(3600);
+        while self.samples.front().is_some_and(|(time, _)| *time < one_hour_ago) {
+            self.samples.pop_front();
+        }
+        
+        // Also respect max_samples limit
+        while self.samples.len() > self.max_samples {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Get average hashrate for a specific time window in seconds
+    fn get_average(&self, window_secs: u64) -> f64 {
+        if self.samples.is_empty() {
+            return 0.0;
+        }
+
+        let now = std::time::Instant::now();
+        let cutoff = now - std::time::Duration::from_secs(window_secs);
+        
+        // Collect all samples within the time window
+        let mut window_samples = Vec::new();
+        for (time, rate) in self.samples.iter() {
+            if *time >= cutoff {
+                window_samples.push(*rate);
+            }
+        }
+
+        if window_samples.is_empty() {
+            // No samples in this window yet, use the most recent sample as fallback
+            return self.samples.back().map(|(_, rate)| *rate).unwrap_or(0.0);
+        }
+
+        // Calculate simple average of samples in the window
+        let sum: f64 = window_samples.iter().sum();
+        sum / window_samples.len() as f64
+    }
+}
+
+/// Statistics for a single GPU with efficient moving averages
 #[derive(Debug, Clone)]
 pub struct GpuStats {
     pub gpu_index: usize,
@@ -34,10 +93,15 @@ pub struct GpuStats {
     pub temperature: Option<i32>,
     pub power_usage: Option<f64>,
     pub utilization: Option<i32>,
+    pub moving_avg: MovingAverage,
+    pub start_time: std::time::Instant,
+    pub last_sample_hashes: u64,
+    pub last_sample_time: std::time::Instant,
 }
 
 impl GpuStats {
     pub fn new(gpu_index: usize) -> Self {
+        let now = std::time::Instant::now();
         Self {
             gpu_index,
             hashes: 0,
@@ -48,27 +112,48 @@ impl GpuStats {
             temperature: None,
             power_usage: None,
             utilization: None,
+            moving_avg: MovingAverage::new(),
+            start_time: now,
+            last_sample_hashes: 0,
+            last_sample_time: now,
         }
     }
-}
 
-/// Global mining statistics
-#[derive(Debug, Clone)]
-pub struct GlobalStats {
-    pub hashes: u64,
-    pub shares_found: u64,
-    pub shares_accepted: u64,
-    pub shares_rejected: u64,
-}
+    /// Update hashrate and moving averages with new measurement
+    pub fn update_hashrate(&mut self, new_hashrate: f64) {
+        self.current_hashrate = new_hashrate;
+        self.moving_avg.update(new_hashrate);
+    }
 
-impl GlobalStats {
-    pub fn new() -> Self {
-        Self {
-            hashes: 0,
-            shares_found: 0,
-            shares_accepted: 0,
-            shares_rejected: 0,
+    /// Sample hashrate based on cumulative hashes and time elapsed
+    /// This should be called periodically (e.g., every second) to get accurate averages
+    pub fn sample_hashrate(&mut self) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_sample_time).as_secs_f64();
+        
+        if elapsed < 0.1 {
+            // Too little time has passed, skip this sample
+            return;
         }
+        
+        let hashes_delta = self.hashes.saturating_sub(self.last_sample_hashes);
+        
+        if hashes_delta > 0 && elapsed > 0.0 {
+            let hashrate = (hashes_delta as f64) / elapsed;
+            self.current_hashrate = hashrate;
+            self.moving_avg.update(hashrate);
+            
+            tracing::trace!("GPU #{} sampled hashrate: {} hashes in {:.3}s = {:.2} MH/s",
+                self.gpu_index, hashes_delta, elapsed, hashrate / 1_000_000.0);
+        }
+        
+        self.last_sample_hashes = self.hashes;
+        self.last_sample_time = now;
+    }
+
+    /// Get average hashrate for a specific time window
+    pub fn get_average_hashrate(&self, window_secs: u64) -> f64 {
+        self.moving_avg.get_average(window_secs)
     }
 }
 
@@ -76,7 +161,7 @@ impl GlobalStats {
 #[derive(Debug)]
 enum GpuMiningResult {
     StatsUpdate { gpu_index: usize, hashes: u64, kernel_ms: u64 },
-    ShareFound { gpu_index: usize, nonce: u32, hash: [u8; 32], extranonce2: Vec<u8>, job_id: String, ntime: String },
+    ShareFound { gpu_index: usize, nonce: u32, hash: [u8; 32], extranonce2: Vec<u8>, job_id: String, ntime: String, nbits: String },
     Error { gpu_index: usize, error: String },
 }
 
@@ -107,9 +192,10 @@ async fn gpu_mining_task(
     stats_tx: mpsc::Sender<GpuMiningResult>,
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     stratum_client: std::sync::Arc<tokio::sync::Mutex<StratumClient>>,
+    algo: String,
 ) {
     let gpu_index = gpu_miner.device.id;
-    let chunk_size = 50_000_000u32; // 50M nonces per batch
+    let chunk_size = 10_000_000u32; // Larger chunk size for better GPU utilization
     let mut current_nonce = (gpu_index as u32) * 1_000_000_000; // Unique nonce space per GPU
     let mut extranonce2_counter: u32 = (gpu_index as u32) << 24; // Unique extranonce2 per GPU (bit-shifted for collision prevention)
     
@@ -133,6 +219,26 @@ async fn gpu_mining_task(
             }
         };
         
+        // Fast sanity: avoid algo/job mismatches to prevent confusion
+        let is_ethash_job = job.seed_hash.is_some();
+        if algo.eq_ignore_ascii_case("qhash") && is_ethash_job {
+            let _ = stats_tx.send(GpuMiningResult::Error {
+                gpu_index,
+                error: "Algorithm mismatch: pool is sending Etchash/Ethash jobs but you selected --algo qhash. Do not mix algorithms. Use a QHash-compatible pool/URL or change --algo.".to_string()
+            }).await;
+            // Signal global shutdown and exit this task to avoid repeated errors
+            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+            break;
+        }
+        if algo.eq_ignore_ascii_case("ethash") && !is_ethash_job {
+            let _ = stats_tx.send(GpuMiningResult::Error {
+                gpu_index,
+                error: "Algorithm mismatch: this pool endpoint is not sending Etchash/Ethash jobs. Use a proper Ethash/Etchash endpoint or select another algorithm.".to_string()
+            }).await;
+            shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+            break;
+        }
+
         // Get extranonce1 and create unique extranonce2 for this GPU
         let (extranonce1, extranonce2) = {
             let stratum_lock = stratum_client.lock().await;
@@ -148,11 +254,13 @@ async fn gpu_mining_task(
         let extranonce2_clone = extranonce2.clone();
         let job_id = job.job_id.clone();
         let ntime = job.ntime.clone();
+        let nbits = job.nbits.clone();
+        let job_clone = job.clone();
         
         let mining_result = tokio::task::spawn_blocking(move || {
             let backend_ref = backend_clone.blocking_lock();
             backend_ref.mine_job(
-                &job,
+                &job_clone,
                 &extranonce1,
                 &extranonce2_clone,
                 nonce_start,
@@ -177,8 +285,9 @@ async fn gpu_mining_task(
                             nonce,
                             hash: *hash,
                             extranonce2,
-                            job_id,
-                            ntime,
+                            job_id: job_id.clone(),
+                            ntime: ntime.clone(),
+                            nbits: nbits.clone(),
                         }).await;
                     }
                 }
@@ -202,16 +311,26 @@ async fn gpu_mining_task(
 }
 
 /// Create mining backend for specific device (synchronous wrapper)
+#[allow(clippy::type_complexity)]
 fn create_backend_for_device_sync(algo: &str, device_index: usize) -> Result<(std::sync::Arc<tokio::sync::Mutex<Box<dyn MiningBackend>>>, backend::GpuInfo)> {
     match algo {
         "qhash" => {
-            let backend = cuda::QHashCudaBackend::new(device_index)?;
+            let mut backend = cuda::QHashCudaBackend::new(device_index)?;
+            // Initialize the backend (use initialize method to avoid dead_code warning)
+            backend.initialize()?;
+            let device_info = backend.device_info()?;
+            let boxed: Box<dyn MiningBackend> = Box::new(backend);
+            Ok((std::sync::Arc::new(tokio::sync::Mutex::new(boxed)), device_info))
+        }
+        "ethash" => {
+            let mut backend = cuda::EthashCudaBackend::new(device_index)?;
+            backend.initialize()?;
             let device_info = backend.device_info()?;
             let boxed: Box<dyn MiningBackend> = Box::new(backend);
             Ok((std::sync::Arc::new(tokio::sync::Mutex::new(boxed)), device_info))
         }
         _ => {
-            anyhow::bail!("Unsupported algorithm: {}", algo);
+            anyhow::bail!("Unsupported algorithm: {}. Supported algorithms: qhash, ethash", algo);
         }
     }
 }
@@ -239,6 +358,8 @@ async fn main() -> Result<()> {
         eprintln!("{}", "Error: --algo is required".red().bold());
         std::process::exit(1);
     }
+
+    // For now, Ethash mining is blocked until DAG is implemented. We'll allow DAG preparation below.
 
     // Validate mining URL
     if args.url.is_empty() {
@@ -283,6 +404,19 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+    
+    // Verify at least one GPU was detected
+    if all_devices.is_empty() {
+        eprintln!("\n{}", "❌ No CUDA-Compatible GPU Found!".red().bold());
+        eprintln!("{}", "rust-miner requires an NVIDIA GPU with CUDA support.".yellow());
+        eprintln!("\n{}", "This is not a CPU mining application.".yellow().bold());
+        eprintln!("\n{}", "To use this miner, you need:".cyan());
+        eprintln!("{}", "  1. NVIDIA GPU (GeForce GTX 1050 Ti or better)".cyan());
+        eprintln!("{}", "  2. NVIDIA Drivers installed".cyan());
+        eprintln!("{}", "  3. CUDA Toolkit 12.0 or newer".cyan());
+        eprintln!("\n{}", "See CUDA_ONLY_ARCHITECTURE.md for details.".cyan());
+        std::process::exit(1);
+    }
     
     // Display detected GPUs
     println!("\n{}", "=== Detected GPUs ===".cyan().bold());
@@ -374,16 +508,58 @@ async fn main() -> Result<()> {
     
     println!("\n{}", "=== Mining Status ===".cyan().bold());
     println!("{}", "Waiting for jobs from pool...".yellow());
+
+    // If Ethash was requested, prepare DAG from first notify and exit (no mining yet)
+    let ethash_prepare_only = args.algo.eq_ignore_ascii_case("ethash");
+    if ethash_prepare_only {
+        // Wait for first job
+        let job_opt = {
+            let sc = std::sync::Arc::new(tokio::sync::Mutex::new(stratum_client));
+            let lock = sc.clone();
+            let mut job = None;
+            for _ in 0..30 { // wait up to ~30 seconds
+                if let Some(j) = lock.lock().await.get_job().await { job = Some(j); break; }
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+            }
+            job
+        };
+
+        match job_opt {
+            Some(job) => {
+                if let Some(seed) = job.seed_hash.as_ref() {
+                    let height = job.height;
+                    let info = ethdag::prepare_from_pool(seed, height)?;
+                    println!("DAG info: epoch {} | dataset ~{:.2} MB | path {}",
+                        info.epoch,
+                        (info.dataset_bytes as f64) / (1024.0 * 1024.0),
+                        info.dataset_path.display());
+                    if ethdag::dataset_on_disk(&info) {
+                        println!("DAG dataset detected on disk: {}", info.dataset_path.display());
+                        println!("Exiting (DAG preparation only). Next step: GPU upload + kernel integration. CPU generation is disabled.");
+                        return Ok(())
+                    } else {
+                        eprintln!("{}", "DAG dataset not found on disk.".yellow());
+                        eprintln!("Expected path: {}", info.dataset_path.display());
+                        eprintln!("{}", "CPU DAG generation is disabled (too slow). We'll add a GPU-only generator to create/upload the DAG.".yellow());
+                        std::process::exit(1);
+                    }
+                } else {
+                    eprintln!("{}", "Pool job did not include seed_hash. Cannot prepare DAG.".red());
+                    std::process::exit(1);
+                }
+            }
+            None => {
+                eprintln!("{}", "Timeout waiting for mining.notify to prepare DAG.".red());
+                std::process::exit(1);
+            }
+        }
+    }
     
     // Channel for GPU workers to send statistics and shares to main thread
     let (stats_tx, mut stats_rx) = mpsc::channel::<GpuMiningResult>(32);
     
     // Global mining statistics (aggregated across all GPUs)
     let mut global_stats = MiningStats::new();
-    let mut sample_timer = std::time::Instant::now();
-    
-    // Long-term windows for 1h/6h/24h views (sample per chunk)
-    let mut long_samples: VecDeque<(std::time::Instant, u64)> = VecDeque::new();
     
     // Ctrl+C handler with atomic flag
     let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -410,13 +586,16 @@ async fn main() -> Result<()> {
     
     // Collect all GPU mining tasks
     let mut mining_tasks = Vec::new();
+    // Capture algorithm string safely for async tasks
+    let algo_for_tasks = args.algo.clone();
     for gpu_miner in gpu_miners_ref.lock().await.clone() {
         let stats_tx = stats_tx.clone();
         let shutdown = shutdown.clone();
         let stratum_client = stratum_client.clone();
+        let algo_clone = algo_for_tasks.clone();
         
         let task = tokio::spawn(async move {
-            gpu_mining_task(gpu_miner, stats_tx, shutdown, stratum_client).await;
+            gpu_mining_task(gpu_miner, stats_tx, shutdown, stratum_client, algo_clone).await;
         });
         mining_tasks.push(task);
     }
@@ -448,14 +627,21 @@ async fn main() -> Result<()> {
                         // Update individual GPU stats
                         if let Some(gpu_miner) = gpu_miners_display.lock().await.get_mut(gpu_index) {
                             gpu_miner.stats.hashes += hashes;
-                            // Calculate hashrate based on recent hashes (simplified)
-                            gpu_miner.stats.current_hashrate = (hashes as f64) / (kernel_ms as f64 / 1000.0);
+                            
+                            // Calculate hashrate properly:
+                            // kernel_ms is actual GPU kernel execution time
+                            // hashes is number of hashes computed in that time
+                            // hashrate = hashes / time_in_seconds
+                            let kernel_seconds = (kernel_ms as f64) / 1000.0;
+                            let hashrate = (hashes as f64) / kernel_seconds;
+                            
+                            gpu_miner.stats.update_hashrate(hashrate);
                         }
                         
-                        // Log per-GPU stats
+                        // Log per-GPU stats (trace level - very verbose)
                         tracing::trace!("GPU #{}: {} hashes, {} ms kernel", gpu_index, hashes, kernel_ms);
                     }
-                    GpuMiningResult::ShareFound { gpu_index, nonce, hash, extranonce2, job_id, ntime } => {
+                    GpuMiningResult::ShareFound { gpu_index, nonce, hash, extranonce2, job_id, ntime, nbits } => {
                         global_stats.shares_found += 1;
                         
                         // Submit share to pool
@@ -483,14 +669,20 @@ async fn main() -> Result<()> {
                         ).await {
                                 Ok(true) => {
                                     global_stats.shares_accepted += 1;
-                                    // WildRig-style share accepted log
+                                    // Calculate actual difficulty from nbits
+                                    let actual_difficulty = if let Ok(nbits_val) = u32::from_str_radix(&nbits, 16) {
+                                        mining::nbits_to_difficulty(nbits_val)
+                                    } else {
+                                        1.0 // fallback
+                                    };
+                                    // Share accepted log
                                     println!("[{}] accepted ({}/{})       diff {:.2}G    GPU#{}   ({:.0} ms)",
                                         chrono::Local::now().format("%H:%M:%S"),
                                         global_stats.shares_accepted,
                                         global_stats.shares_rejected,
-                                        1.0, // TODO: Get actual difficulty from job
-                                        gpu_index, // GPU index
-                                        0 // TODO: track actual time
+                                        actual_difficulty,
+                                        gpu_index,
+                                        0.0
                                     );
                                 }
                                 Ok(false) => {
@@ -513,26 +705,17 @@ async fn main() -> Result<()> {
             
             // Periodic UI update
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
-                // Print WildRig-style stats for all GPUs
-                let gpu_miners_locked = gpu_miners_display.lock().await;
-                print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats, start_time, &long_samples).await?;
-                
-                // Add sample every 5 seconds for historical averages
-                if sample_timer.elapsed().as_secs() >= 5 {
-                    let now = std::time::Instant::now();
-                    long_samples.push_back((now, global_stats.hashes));
-                    
-                    // Purge samples older than 24h
-                    while let Some(&(t, _)) = long_samples.front() {
-                        if now.duration_since(t).as_secs() > 24 * 3600 {
-                            long_samples.pop_front();
-                        } else {
-                            break;
-                        }
+                // Sample hashrate for all GPUs based on cumulative hashes
+                {
+                    let mut gpu_miners_locked = gpu_miners_display.lock().await;
+                    for gpu_miner in gpu_miners_locked.iter_mut() {
+                        gpu_miner.stats.sample_hashrate();
                     }
-                    
-                    sample_timer = now;
                 }
+                
+                // Print multi-GPU statistics
+                let gpu_miners_locked = gpu_miners_display.lock().await;
+                print_multi_gpu_stats(&gpu_miners_locked, &global_stats, start_time).await?;
             }
         }
         
@@ -541,46 +724,9 @@ async fn main() -> Result<()> {
             println!("\n{}", "=== Statistics ===".cyan());
             println!("   {} {}", "Total Hashes:".green(), global_stats.hashes);
             println!("   {} {}", "Shares Found:".green(), global_stats.shares_found);
-            // Print WildRig-like statistics block (best-effort)
+            // Print multi-GPU statistics block (best-effort)
             let gpu_miners_locked = gpu_miners_display.lock().await;
-            print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats, start_time, &long_samples).await?;
-            // Add a long-sample for the last processed chunk to support 1h/6h/24h views
-            let now = std::time::Instant::now();
-            long_samples.push_back((now, global_stats.hashes));
-            // Purge samples older than 24h
-            while let Some(&(t, _)) = long_samples.front() {
-                if now.duration_since(t).as_secs() > 24 * 3600 {
-                    long_samples.pop_front();
-                } else {
-                    break;
-                }
-            }
-
-            // Compute hash-rate window functions
-            let calc_window = |secs: u64| -> f64 {
-                if long_samples.is_empty() { return 0.0; }
-                let cutoff = now - std::time::Duration::from_secs(secs);
-                // Sum bytes newer than cutoff
-                let mut sum: u64 = 0;
-                let mut earliest = now;
-                for &(t, h) in long_samples.iter().rev() { // iterate from newest
-                    if t >= cutoff {
-                        sum = sum.saturating_add(h);
-                        earliest = t;
-                    } else {
-                        break;
-                    }
-                }
-                let dur = now.duration_since(earliest).as_secs_f64();
-                if dur <= 0.0 { return 0.0; }
-                (sum as f64) / dur
-            };
-
-            // Print 1h/6h/24h averages in MH/s
-            let m1 = calc_window(3600) / 1_000_000.0;
-            let m6 = calc_window(3600 * 6) / 1_000_000.0;
-            let m24 = calc_window(3600 * 24) / 1_000_000.0;
-            println!("   {} {:.2} MH/s | {} {:.2} MH/s | {} {:.2} MH/s", "1h".green(), m1, "6h".green(), m6, "24h".green(), m24);
+            print_multi_gpu_stats(&gpu_miners_locked, &global_stats, start_time).await?;
         }
     }
 
@@ -588,6 +734,7 @@ async fn main() -> Result<()> {
 }
 
 // Try to get GPU stats from nvidia-smi (best-effort). Returns (temp, fan, power, gfx_clock, mem_clock)
+#[allow(clippy::type_complexity)]
 fn get_gpu_stats(device_index: usize) -> Option<(Option<u32>, Option<u32>, Option<f64>, Option<u32>, Option<u32>)> {
     // Query: temperature.gpu,fan.speed,power.draw,clocks.gr,clocks.mem
     let out = Command::new("nvidia-smi")
@@ -613,12 +760,11 @@ fn get_gpu_stats(device_index: usize) -> Option<(Option<u32>, Option<u32>, Optio
     Some((temp, fan, power, gfx, mem))
 }
 
-// Print stats in WildRig-like format (multi-GPU support)
-async fn print_wildrig_stats_multi_gpu(
+// Print stats in multi-GPU format
+async fn print_multi_gpu_stats(
     gpu_miners: &[GpuMiner],
     global_stats: &MiningStats,
     start_time: std::time::Instant,
-    long_samples: &VecDeque<(std::time::Instant, u64)>,
 ) -> anyhow::Result<()> {
     use std::fmt::Write as _;
 
@@ -628,17 +774,24 @@ async fn print_wildrig_stats_multi_gpu(
     writeln!(buf, "----------------------------------------------------------------------------------------").ok();
 
     let mut total_rate10 = 0.0;
+    let mut total_rate60 = 0.0;
+    let mut total_rate15m = 0.0;
     let mut total_power = 0.0;
 
     for (idx, gpu) in gpu_miners.iter().enumerate() {
-        // Calculate 10s rate for this GPU (simplified - would need per-GPU history)
-        let rate10 = gpu.stats.current_hashrate; // Use current hashrate as approximation
+        // Use moving averages for accurate rate calculations
+        let rate10 = gpu.stats.get_average_hashrate(10);
+        let rate60 = gpu.stats.get_average_hashrate(60);
+        let rate15m = gpu.stats.get_average_hashrate(900);
+        
         total_rate10 += rate10;
+        total_rate60 += rate60;
+        total_rate15m += rate15m;
 
         // Get GPU stats (placeholder - would need actual monitoring)
         let gstat = get_gpu_stats(idx).unwrap_or((None, None, None, None, None));
 
-        // Calculate efficiency (MH/s per Watt)
+        // Calculate efficiency (MH/s per Watt) using 10s average
         let efficiency = if let Some(power) = gstat.2 {
             if power > 0.0 {
                 (rate10 / 1_000_000.0) / power
@@ -651,8 +804,8 @@ async fn print_wildrig_stats_multi_gpu(
 
         total_power += gstat.2.unwrap_or(0.0);
 
-        // Per-device row - WildRig style
-        writeln!(buf, " #{} {:26} {:9.2} MH/s  {}C  {}%  {:.1}W {:.3} {} {}     {}   {}   {}",
+        // Per-device row
+        writeln!(buf, " #{} {:26} {:9.2} MH/s  {}C  {}%  {:.1}W {:.3} {} {}     {}   {}   -",
             idx,
             gpu.device_info.name,
             rate10 / 1_000_000.0,
@@ -664,58 +817,43 @@ async fn print_wildrig_stats_multi_gpu(
             gstat.4.map(|c| c.to_string()).unwrap_or_else(|| "-".to_string()),
             global_stats.shares_accepted,
             if global_stats.shares_rejected > 0 { global_stats.shares_rejected.to_string() } else { "-".to_string() },
-            "-"  // Ignored shares
+            
         ).ok();
+        
+        // Log device specifications for trace-level debugging
+        tracing::trace!("GPU #{}: {} MB memory, {} compute units, {} MHz clock",
+            idx, gpu.device_info.memory_mb, gpu.device_info.compute_units, gpu.device_info.clock_mhz);
     }
 
     writeln!(buf, "----------------------------------------------------------------------------------------").ok();
 
-    // Calculate rates for different time windows using historical data
-    let now = std::time::Instant::now();
-    let calc_window_rate = |window_secs: u64| -> f64 {
-        if long_samples.is_empty() {
-            return total_rate10; // No historical data yet
-        }
-
-        let cutoff = now - std::time::Duration::from_secs(window_secs);
-
-        // Find samples within the specific time window
-        let window_samples: Vec<(std::time::Instant, u64)> = long_samples.iter()
-            .filter(|&&(t, _)| t >= cutoff)
-            .cloned()
-            .collect();
-
-        if window_samples.len() < 2 {
-            // Not enough samples in this specific window yet
-            return 0.0; // Show 0.00 until we have data for this window
-        }
-
-        // Calculate hashes processed in this window
-        let first_sample = window_samples.first().unwrap();
-        let last_sample = window_samples.last().unwrap();
-        let hashes_in_window = last_sample.1.saturating_sub(first_sample.1);
-
-        // Calculate actual time span of the samples in this window
-        let time_span = last_sample.0.duration_since(first_sample.0).as_secs_f64();
-
-        if time_span <= 0.0 || hashes_in_window == 0 {
-            return 0.0;
-        }
-
-        // Return hashrate for this specific time window
-        hashes_in_window as f64 / time_span
-    };
-
-    let rate10s = calc_window_rate(10);
-    let rate60s = calc_window_rate(60);
-    let rate15m = calc_window_rate(15 * 60);
-
-    writeln!(buf, " 10s: {:>28.2} MH/s Power: {:>7.1}W            Accepted: {:>8}",
-             rate10s / 1_000_000.0, total_power, global_stats.shares_accepted).ok();
-    writeln!(buf, " 60s: {:>28.2} MH/s                             Rejected: {:>8}",
-             rate60s / 1_000_000.0, if global_stats.shares_rejected > 0 { global_stats.shares_rejected.to_string() } else { "-".to_string() }).ok();
-    writeln!(buf, " 15m: {:>28.2} MH/s                             Ignored: {:>9}",
-             rate15m / 1_000_000.0, "-").ok();
+    // Use the aggregated moving averages from all GPUs
+    // Show which windows have sufficient data
+    let elapsed_secs = start_time.elapsed().as_secs();
+    
+    if elapsed_secs >= 10 {
+        writeln!(buf, " 10s: {:>28.2} MH/s Power: {:>7.1}W            Accepted: {:>8}",
+                 total_rate10 / 1_000_000.0, total_power, global_stats.shares_accepted).ok();
+    } else {
+        writeln!(buf, " 10s: {:>28.2} MH/s Power: {:>7.1}W ({}s)     Accepted: {:>8}",
+                 total_rate10 / 1_000_000.0, total_power, elapsed_secs, global_stats.shares_accepted).ok();
+    }
+    
+    if elapsed_secs >= 60 {
+        writeln!(buf, " 60s: {:>28.2} MH/s                             Rejected: {:>8}",
+                 total_rate60 / 1_000_000.0, if global_stats.shares_rejected > 0 { global_stats.shares_rejected.to_string() } else { "-".to_string() }).ok();
+    } else {
+        writeln!(buf, " 60s: {:>28.2} MH/s ({}s)                       Rejected: {:>8}",
+                 total_rate60 / 1_000_000.0, elapsed_secs, if global_stats.shares_rejected > 0 { global_stats.shares_rejected.to_string() } else { "-".to_string() }).ok();
+    }
+    
+    if elapsed_secs >= 900 {
+        writeln!(buf, " 15m: {:>28.2} MH/s                             Ignored: {:>9}",
+                 total_rate15m / 1_000_000.0, "-").ok();
+    } else {
+        writeln!(buf, " 15m: {:>28.2} MH/s ({}s)                       Ignored: {:>9}",
+                 total_rate15m / 1_000_000.0, elapsed_secs, "-").ok();
+    }
     
     // Format uptime as HH:MM:SS
     let elapsed = start_time.elapsed();

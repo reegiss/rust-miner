@@ -14,7 +14,8 @@ fn main() -> anyhow::Result<()> {
 
     // Initialize CUDA miner
     println!("Initializing CUDA miner...");
-    let miner = CudaMiner::new()?;
+    // Use first CUDA device (index 0) for the benchmark
+    let miner = CudaMiner::new(0)?;
     
     // Get device info
     let device_name = miner.device_name()?;

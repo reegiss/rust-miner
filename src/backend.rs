@@ -1,6 +1,5 @@
 /// GPU Mining backend abstraction layer (Hexagonal Architecture - Port)
 /// Enables swapping GPU implementations (CUDA-only) and algorithms
-
 use anyhow::Result;
 use crate::stratum::StratumJob;
 
@@ -11,7 +10,6 @@ pub struct MiningResult {
     pub nonce: Option<u32>,
     pub hash: Option<Box<[u8; 32]>>,
     pub hashes_computed: u64,
-    pub kernel_time_ms: u32,
 }
 
 /// GPU device information

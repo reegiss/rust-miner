@@ -23,6 +23,10 @@ impl MiningStats {
     }
 }
 
+impl Default for MiningStats {
+    fn default() -> Self { Self::new() }
+}
+
 /// Convert hex string to big-endian bytes
 pub fn hex_to_bytes_be(hex: &str) -> Result<Vec<u8>> {
     let hex = hex.trim_start_matches("0x");
@@ -48,7 +52,7 @@ pub fn calculate_merkle_root(
         let mut hasher = Sha256::new();
         hasher.update(data);
         let first = hasher.finalize_reset();
-        hasher.update(&first);
+        hasher.update(first);
         hasher.finalize().into()
     }
 

@@ -111,7 +111,7 @@ impl _QHash {
     /// Uses 15 fractional bits (1 sign bit + 15 fractional)
     fn _to_fixed_point(value: f64) -> i16 {
         // Clamp to [-1.0, 1.0]
-        let clamped = value.max(-1.0).min(1.0);
+    let clamped = value.clamp(-1.0, 1.0);
         // Scale to i16 range with 15 fractional bits
         // Range: -32768 to 32767 represents -1.0 to ~0.9999
         (clamped * 32768.0) as i16
@@ -130,19 +130,19 @@ impl _HashAlgorithm for _QHash {
         let initial_hash: [u8; 32] = hasher.finalize().into();
         
         // Step 2: Split into nibbles
-        let nibbles = Self::_split_nibbles(&initial_hash);
+    let nibbles = Self::_split_nibbles(&initial_hash);
         
         // Step 3: Run quantum circuit simulation
         let expectations = self._run_quantum_simulation(&nibbles);
         
         // Step 4: Convert expectations to fixed-point and concatenate
         let mut final_hasher = Sha256::new();
-        final_hasher.update(&initial_hash);
+    final_hasher.update(initial_hash);
         
         for exp in expectations.iter() {
             let fixed_point = Self::_to_fixed_point(*exp);
             // Write as little-endian bytes (matching QubitCoin implementation)
-            final_hasher.update(&fixed_point.to_le_bytes());
+            final_hasher.update(fixed_point.to_le_bytes());
         }
         
         // Step 5: Final SHA256

@@ -126,61 +126,68 @@ impl StratumClient {
                             continue;
                         }
                         
+                        // Debug: Print all incoming traffic
+                        tracing::info!("RX: {}", line);
+
                         match serde_json::from_str::<StratumResponse>(line) {
                             Ok(response) => {
-                                // Check if it's a notification or response
-                                if response.id.is_some() {
-                                    // This is a response to our request
-                                    if response_sender.send(response).is_err() {
-                                        tracing::error!("Failed to send response to handler");
-                                    }
-                                } else {
-                                    // This is a notification
-                                    if let Some(method) = response.get_method() {
+                                // Check if it's a notification (has method) or response (no method, has id)
+                                if let Some(method) = response.get_method() {
+                                    // It has a method, so it's a notification or server request
                                         if method == StratumMethod::Notify.as_str() {
                                             if let Some(params) = &response.params {
                                                 match StratumJob::from_params(params) {
-                                                    Ok(job) => {
-                                                        // WildRig-style job notification
-                                                        println!("[{}] new job from {} diff {:.2}G/{:.2}P",
-                                                            chrono::Local::now().format("%H:%M:%S"),
-                                                            pool_url,
-                                                            job.difficulty / 1_000_000_000.0, // Convert to G
-                                                            job.difficulty / 1_000_000_000.0  // Same as network diff for now
-                                                        );
-                                                        
-                                                        // Block information
-                                                        if let Ok(block_height) = u32::from_str_radix(&job.ntime, 16) {
-                                                            println!("[{}] block: {}        job target: 0x{} 0x{}",
+                                                    Ok(mut job) => {
+                                                        // Attach extra fields if present
+                                                        if let Some(v) = response.extra.get("height").and_then(|v| v.as_u64()) {
+                                                            job.height = Some(v);
+                                                        }
+                                                        if let Some(a) = response.extra.get("algo").and_then(|v| v.as_str()) {
+                                                            job.algo = Some(a.to_string());
+                                                        }
+                                                    // WildRig-style job notification
+                                                    println!("[{}] new job from {} diff {:.2}G/{:.2}P",
+                                                        chrono::Local::now().format("%H:%M:%S"),
+                                                        pool_url,
+                                                        job.difficulty / 1_000_000_000.0, // Convert to G
+                                                        job.difficulty / 1_000_000_000.0  // Same as network diff for now
+                                                    );
+                                                    
+                                                    // Block information
+                                                        if let Some(h) = job.height {
+                                                            println!("[{}] height: {}   algo: {}",
                                                                 chrono::Local::now().format("%H:%M:%S"),
-                                                                block_height,
-                                                                &job.nbits[..8], // First 8 chars of nbits
-                                                                &job.nbits[8..]  // Last 8 chars of nbits
+                                                                h,
+                                                                job.algo.clone().unwrap_or_else(|| "?".to_string())
                                                             );
                                                         }
-                                                        
-                                                        tracing::info!(
-                                                            "New job received: {} (clean={})",
-                                                            job.job_id,
-                                                            job.clean_jobs
-                                                        );
-                                                        
-                                                        if job_sender.send(job).is_err() {
-                                                            tracing::error!("Failed to send job to receiver");
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        tracing::error!("Failed to parse job: {}", e);
+                                                    
+                                                    tracing::info!(
+                                                        "New job received: {} (clean={})",
+                                                        job.job_id,
+                                                        job.clean_jobs
+                                                    );
+                                                    
+                                                    if job_sender.send(job).is_err() {
+                                                        tracing::error!("Failed to send job to receiver");
                                                     }
                                                 }
-                                            }
-                                        } else if method == StratumMethod::SetDifficulty.as_str() {
-                                            if let Some(params) = &response.params {
-                                                if let Some(diff) = params.get(0).and_then(|v| v.as_f64()) {
-                                                    tracing::info!("Difficulty set to: {}", diff);
+                                                Err(e) => {
+                                                    tracing::error!("Failed to parse job: {}", e);
                                                 }
                                             }
                                         }
+                                    } else if method == StratumMethod::SetDifficulty.as_str() {
+                                        if let Some(params) = &response.params {
+                                            if let Some(diff) = params.first().and_then(|v| v.as_f64()) {
+                                                tracing::info!("Difficulty set to: {}", diff);
+                                            }
+                                        }
+                                    }
+                                } else if response.id.is_some() {
+                                    // No method, but has ID -> Response to our request
+                                    if response_sender.send(response).is_err() {
+                                        tracing::error!("Failed to send response to handler");
                                     }
                                 }
                             }
@@ -320,7 +327,6 @@ impl StratumClient {
     }
     
     /// Start listening for server notifications (mining.notify, etc.)
-    
     /// Get next job from the queue
     pub async fn get_job(&self) -> Option<StratumJob> {
         self.job_receiver.lock().await.recv().await
@@ -360,12 +366,6 @@ impl StratumClient {
         }
         
         extranonce2
-    }
-    
-    /// Check if there's a pending job (non-blocking)
-    pub async fn has_pending_job(&self) -> bool {
-        let receiver = self.job_receiver.lock().await;
-        !receiver.is_empty()
     }
 }
 
