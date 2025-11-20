@@ -13,12 +13,27 @@ pub struct DagInfo {
     pub cache_path: PathBuf,
 }
 
-/// ETC/ETH epoch length in blocks
+/// PoW algorithms supported for DAG sizing
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PowAlgo {
+    Ethash,
+    Etchash,
+}
+
+/// ETHASH epoch length in blocks (Ethereum-like)
 pub const ETHASH_EPOCH_LENGTH: u64 = 30_000;
+/// ETCHASH epoch length in blocks (ECIP-1099)
+pub const ETCHASH_EPOCH_LENGTH: u64 = 60_000;
 
 /// Compute epoch from block height
-pub fn epoch_from_height(height: u64) -> u64 {
-    height / ETHASH_EPOCH_LENGTH
+pub fn epoch_from_height(height: u64) -> u64 { height / ETHASH_EPOCH_LENGTH }
+
+/// Compute epoch from block height based on algorithm
+pub fn epoch_from_height_for_algo(height: u64, algo: PowAlgo) -> u64 {
+    match algo {
+        PowAlgo::Ethash => height / ETHASH_EPOCH_LENGTH,
+        PowAlgo::Etchash => height / ETCHASH_EPOCH_LENGTH,
+    }
 }
 
 /// Default DAG directory: ~/.cache/rust-miner/dag
@@ -88,9 +103,19 @@ fn cache_filename(epoch: u64) -> String {
 }
 
 /// Prepare DAG info from pool job data (seed hash and optional height)
-pub fn prepare_from_pool(seed_hash_hex: &str, height: Option<u64>) -> Result<DagInfo> {
+/// If `algo_hint` is Some("etchash"), use Etchash epoch sizing; otherwise default to Ethash.
+pub fn prepare_from_pool(seed_hash_hex: &str, height: Option<u64>, algo_hint: Option<&str>) -> Result<DagInfo> {
     let seed_hash = parse_seed_hash(seed_hash_hex)?;
-    let epoch = match height { Some(h) => epoch_from_height(h), None => 0 }; // prefer height if provided
+    // Detect algorithm from hint (case-insensitive), default to Ethash
+    let pow_algo = match algo_hint.map(|s| s.to_ascii_lowercase()) {
+        Some(a) if a.contains("etchash") => PowAlgo::Etchash,
+        _ => PowAlgo::Ethash,
+    };
+    // Prefer height if provided; otherwise default to epoch 0
+    let epoch = match height {
+        Some(h) => epoch_from_height_for_algo(h, pow_algo),
+        None => 0,
+    };
     let dataset_bytes = ethash_dataset_size(epoch);
     let cache_bytes = ethash_cache_size(epoch);
 

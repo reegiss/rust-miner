@@ -528,7 +528,11 @@ async fn main() -> Result<()> {
             Some(job) => {
                 if let Some(seed) = job.seed_hash.as_ref() {
                     let height = job.height;
-                    let info = ethdag::prepare_from_pool(seed, height)?;
+                    let info = ethdag::prepare_from_pool(
+                        seed,
+                        height,
+                        job.algo.as_deref(),
+                    )?;
                     println!("DAG info: epoch {} | dataset ~{:.2} MB | path {}",
                         info.epoch,
                         (info.dataset_bytes as f64) / (1024.0 * 1024.0),
