@@ -14,7 +14,7 @@ use backend::MiningBackend;
 use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus, GpuDevice};
 use mining::MiningStats;
-use stratum::{StratumClient, StratumConfig, StratumJob};
+use stratum::{StratumClient, StratumConfig};
 use std::collections::VecDeque;
 use std::process::Command;
 use std::time::Duration;
@@ -76,7 +76,7 @@ impl GlobalStats {
 #[derive(Debug)]
 enum GpuMiningResult {
     StatsUpdate { gpu_index: usize, hashes: u64, kernel_ms: u64 },
-    ShareFound { gpu_index: usize, nonce: u32, hash: [u8; 32], extranonce2: Vec<u8> },
+    ShareFound { gpu_index: usize, nonce: u32, hash: [u8; 32], extranonce2: Vec<u8>, job_id: String, ntime: String },
     Error { gpu_index: usize, error: String },
 }
 
@@ -111,7 +111,7 @@ async fn gpu_mining_task(
     let gpu_index = gpu_miner.device.id;
     let chunk_size = 50_000_000u32; // 50M nonces per batch
     let mut current_nonce = (gpu_index as u32) * 1_000_000_000; // Unique nonce space per GPU
-    let mut extranonce2_counter: u32 = gpu_index as u32; // Unique extranonce2 per GPU
+    let mut extranonce2_counter: u32 = (gpu_index as u32) << 24; // Unique extranonce2 per GPU (bit-shifted for collision prevention)
     
     tracing::info!("GPU #{} mining task started with nonce offset: {}", gpu_index, current_nonce);
     
@@ -140,12 +140,14 @@ async fn gpu_mining_task(
             let en2 = stratum_lock.create_extranonce2(extranonce2_counter).await;
             (en1, en2)
         };
-        extranonce2_counter = extranonce2_counter.wrapping_add(1); // Simple increment for now
+        extranonce2_counter = extranonce2_counter.wrapping_add(1); // Increment counter
         
         // Mine on GPU
         let nonce_start = current_nonce;
         let backend_clone = gpu_miner.backend.clone();
         let extranonce2_clone = extranonce2.clone();
+        let job_id = job.job_id.clone();
+        let ntime = job.ntime.clone();
         
         let mining_result = tokio::task::spawn_blocking(move || {
             let backend_ref = backend_clone.blocking_lock();
@@ -175,6 +177,8 @@ async fn gpu_mining_task(
                             nonce,
                             hash: *hash,
                             extranonce2,
+                            job_id,
+                            ntime,
                         }).await;
                     }
                 }
@@ -214,6 +218,8 @@ fn create_backend_for_device_sync(algo: &str, device_index: usize) -> Result<(st
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let start_time = std::time::Instant::now();
+    
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -374,7 +380,7 @@ async fn main() -> Result<()> {
     
     // Global mining statistics (aggregated across all GPUs)
     let mut global_stats = MiningStats::new();
-    let job_count = 0;
+    let mut sample_timer = std::time::Instant::now();
     
     // Long-term windows for 1h/6h/24h views (sample per chunk)
     let mut long_samples: VecDeque<(std::time::Instant, u64)> = VecDeque::new();
@@ -449,7 +455,7 @@ async fn main() -> Result<()> {
                         // Log per-GPU stats
                         tracing::trace!("GPU #{}: {} hashes, {} ms kernel", gpu_index, hashes, kernel_ms);
                     }
-                    GpuMiningResult::ShareFound { gpu_index, nonce, hash, extranonce2 } => {
+                    GpuMiningResult::ShareFound { gpu_index, nonce, hash, extranonce2, job_id, ntime } => {
                         global_stats.shares_found += 1;
                         
                         // Submit share to pool
@@ -457,8 +463,8 @@ async fn main() -> Result<()> {
                         let nonce_hex = format!("{:08x}", nonce);
 
                         tracing::info!(
-                            "GPU #{} found share: job_id=? extranonce2={} ntime=? nonce={}",
-                            gpu_index, extranonce2_hex, nonce_hex,
+                            "GPU #{} found share: job_id={} extranonce2={} ntime={} nonce={}",
+                            gpu_index, job_id, extranonce2_hex, ntime, nonce_hex,
                         );
 
                         println!("\n{}", "🎉 SHARE FOUND!".green().bold());
@@ -468,26 +474,11 @@ async fn main() -> Result<()> {
 
                         println!("   {} Submitting share...", "📤".yellow());
                         
-                        // Get current job for submission (simplified - would need to store current job)
-                        // TODO: Store current job in GpuMiner for share submission
-                        let current_job = StratumJob {
-                            job_id: "unknown".to_string(),
-                            prevhash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-                            coinb1: "".to_string(),
-                            coinb2: "".to_string(),
-                            merkle_branch: vec![],
-                            version: "00000000".to_string(),
-                            nbits: "00000000".to_string(),
-                            ntime: "00000000".to_string(),
-                            clean_jobs: false,
-                            difficulty: 1.0,
-                        };
-                        
                         let stratum_lock = stratum_client.lock().await;
                         match stratum_lock.submit_share(
-                            &current_job.job_id,
+                            &job_id,
                             &extranonce2_hex,
-                            &current_job.ntime,
+                            &ntime,
                             &nonce_hex
                         ).await {
                                 Ok(true) => {
@@ -497,7 +488,7 @@ async fn main() -> Result<()> {
                                         chrono::Local::now().format("%H:%M:%S"),
                                         global_stats.shares_accepted,
                                         global_stats.shares_rejected,
-                                        current_job.difficulty / 1_000_000_000.0, // Convert to G
+                                        1.0, // TODO: Get actual difficulty from job
                                         gpu_index, // GPU index
                                         0 // TODO: track actual time
                                     );
@@ -524,18 +515,35 @@ async fn main() -> Result<()> {
             _ = tokio::time::sleep(Duration::from_secs(1)) => {
                 // Print WildRig-style stats for all GPUs
                 let gpu_miners_locked = gpu_miners_display.lock().await;
-                print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats).await?;
+                print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats, start_time, &long_samples).await?;
+                
+                // Add sample every 5 seconds for historical averages
+                if sample_timer.elapsed().as_secs() >= 5 {
+                    let now = std::time::Instant::now();
+                    long_samples.push_back((now, global_stats.hashes));
+                    
+                    // Purge samples older than 24h
+                    while let Some(&(t, _)) = long_samples.front() {
+                        if now.duration_since(t).as_secs() > 24 * 3600 {
+                            long_samples.pop_front();
+                        } else {
+                            break;
+                        }
+                    }
+                    
+                    sample_timer = now;
+                }
             }
         }
         
-        // Display statistics every 5 jobs
-        if job_count % 5 == 0 && job_count > 0 {
+        // Display statistics every 5 jobs (disabled - now using periodic sampling)
+        if false {
             println!("\n{}", "=== Statistics ===".cyan());
             println!("   {} {}", "Total Hashes:".green(), global_stats.hashes);
             println!("   {} {}", "Shares Found:".green(), global_stats.shares_found);
             // Print WildRig-like statistics block (best-effort)
             let gpu_miners_locked = gpu_miners_display.lock().await;
-            print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats).await?;
+            print_wildrig_stats_multi_gpu(&gpu_miners_locked, &global_stats, start_time, &long_samples).await?;
             // Add a long-sample for the last processed chunk to support 1h/6h/24h views
             let now = std::time::Instant::now();
             long_samples.push_back((now, global_stats.hashes));
@@ -609,6 +617,8 @@ fn get_gpu_stats(device_index: usize) -> Option<(Option<u32>, Option<u32>, Optio
 async fn print_wildrig_stats_multi_gpu(
     gpu_miners: &[GpuMiner],
     global_stats: &MiningStats,
+    start_time: std::time::Instant,
+    long_samples: &VecDeque<(std::time::Instant, u64)>,
 ) -> anyhow::Result<()> {
     use std::fmt::Write as _;
 
@@ -660,18 +670,63 @@ async fn print_wildrig_stats_multi_gpu(
 
     writeln!(buf, "----------------------------------------------------------------------------------------").ok();
 
-    // Calculate rates for different time windows (simplified - would need proper history)
-    let rate60 = total_rate10 * 0.9; // Approximation
-    let rate15m = total_rate10 * 0.8; // Approximation
+    // Calculate rates for different time windows using historical data
+    let now = std::time::Instant::now();
+    let calc_window_rate = |window_secs: u64| -> f64 {
+        if long_samples.is_empty() {
+            return total_rate10; // No historical data yet
+        }
+
+        let cutoff = now - std::time::Duration::from_secs(window_secs);
+
+        // Find samples within the specific time window
+        let window_samples: Vec<(std::time::Instant, u64)> = long_samples.iter()
+            .filter(|&&(t, _)| t >= cutoff)
+            .cloned()
+            .collect();
+
+        if window_samples.len() < 2 {
+            // Not enough samples in this specific window yet
+            return 0.0; // Show 0.00 until we have data for this window
+        }
+
+        // Calculate hashes processed in this window
+        let first_sample = window_samples.first().unwrap();
+        let last_sample = window_samples.last().unwrap();
+        let hashes_in_window = last_sample.1.saturating_sub(first_sample.1);
+
+        // Calculate actual time span of the samples in this window
+        let time_span = last_sample.0.duration_since(first_sample.0).as_secs_f64();
+
+        if time_span <= 0.0 || hashes_in_window == 0 {
+            return 0.0;
+        }
+
+        // Return hashrate for this specific time window
+        hashes_in_window as f64 / time_span
+    };
+
+    let rate10s = calc_window_rate(10);
+    let rate60s = calc_window_rate(60);
+    let rate15m = calc_window_rate(15 * 60);
 
     writeln!(buf, " 10s: {:>28.2} MH/s Power: {:>7.1}W            Accepted: {:>8}",
-             total_rate10 / 1_000_000.0, total_power, global_stats.shares_accepted).ok();
+             rate10s / 1_000_000.0, total_power, global_stats.shares_accepted).ok();
     writeln!(buf, " 60s: {:>28.2} MH/s                             Rejected: {:>8}",
-             rate60 / 1_000_000.0, if global_stats.shares_rejected > 0 { global_stats.shares_rejected.to_string() } else { "-".to_string() }).ok();
+             rate60s / 1_000_000.0, if global_stats.shares_rejected > 0 { global_stats.shares_rejected.to_string() } else { "-".to_string() }).ok();
     writeln!(buf, " 15m: {:>28.2} MH/s                             Ignored: {:>9}",
-             if rate15m > 0.0 { rate15m / 1_000_000.0 } else { 0.0 }, "-").ok();
+             rate15m / 1_000_000.0, "-").ok();
+    
+    // Format uptime as HH:MM:SS
+    let elapsed = start_time.elapsed();
+    let total_seconds = elapsed.as_secs();
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    let uptime_str = format!("{:02}:{:02}:{:02}", hours, minutes, seconds);
+    
     writeln!(buf, "[{}]----------------------------------------------------------[ver. {}]",
-             humantime::format_duration(std::time::Instant::now().elapsed()), env!("CARGO_PKG_VERSION")).ok();
+             uptime_str, env!("CARGO_PKG_VERSION")).ok();
 
     println!("{}", buf);
 
