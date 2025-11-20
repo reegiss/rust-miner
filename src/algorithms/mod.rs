@@ -1,5 +1,6 @@
 /// Mining algorithm trait and implementations
 pub mod qhash;
+// Note: legacy Ethash CPU stub removed from build to avoid dead-code; GPU Ethash lives under `crate::ethash`.
 
 /// Trait for mining hash algorithms
 pub trait _HashAlgorithm {

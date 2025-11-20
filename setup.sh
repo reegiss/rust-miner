@@ -57,11 +57,11 @@ rustup component add clippy rustfmt rust-analyzer 2>/dev/null || true
 echo -e "${GREEN}✓${NC} Components installed"
 echo ""
 
-# Step 4: Install GPU support (CUDA priority)
+# Step 4: Install GPU support (CUDA only)
 echo "🎮 Setting up GPU support..."
 echo ""
-echo "⭐ Priority: CUDA (NVIDIA) for maximum performance"
-echo "   Fallback: OpenCL for compatibility"
+echo "⭐ Required: CUDA (NVIDIA GPUs only)"
+echo "   This miner requires an NVIDIA GPU with CUDA support"
 echo ""
 
 # Check for NVIDIA GPU

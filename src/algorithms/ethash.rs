@@ -9,7 +9,6 @@ use sha3::{Keccak256, Digest};
 /// 3. Final Keccak256(hash1 + mix_digest) → final_hash
 /// 
 /// Reference: https://github.com/ethereum/wiki/wiki/Ethash
-#[allow(dead_code)]
 #[derive(Default)]
 pub struct Ethash {
     // Placeholder for DAG or other state

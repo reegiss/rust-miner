@@ -47,9 +47,10 @@ __device__ void ethash_keccak256(const unsigned char* input, unsigned int input_
 // Main Ethash mining kernel
 extern "C" __global__ void ethash_mine(
     const unsigned char* block_header,      // 80-byte block header
-    unsigned int nonce_start,                // Starting nonce for this kernel
-    unsigned int* solution,                  // Output: [nonce, found_flag]
-    unsigned int difficulty_target           // Simplified difficulty
+    unsigned int nonce_start,               // Starting nonce for this kernel
+    unsigned int* solution,                 // Output: [nonce, found_flag]
+    unsigned int difficulty_target,         // Simplified difficulty
+    unsigned char* found_hash_out           // Output: 32-byte hash when found
 ) {
     unsigned int gid = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned int nonce = nonce_start + gid;
@@ -97,5 +98,27 @@ extern "C" __global__ void ethash_mine(
         // Found a solution! Store nonce
         atomicCAS(solution, 0, nonce);
         solution[1] = 1; // Found flag
+        // Write found hash (best-effort; race acceptable since any found is fine)
+        if (threadIdx.x % 32 == 0) {
+            for (int i = 0; i < 32; i++) {
+                found_hash_out[i] = final_hash[i];
+            }
+        }
     }
+}
+
+// Preferred kernel API: includes DAG pointer and explicit target buffer
+extern "C" __global__ void ethash_search(
+    const unsigned char* dag,               // DAG in VRAM (unused in simplified kernel)
+    unsigned long long dag_bytes,           // Size of DAG in bytes
+    const unsigned char* block_header,      // 80-byte block header
+    unsigned int nonce_start,               // Starting nonce for this kernel
+    unsigned int num_nonces,                // Number of nonces to try (unused here; grid covers it)
+    const unsigned char* target_be,         // 32-byte target (big-endian) - unused in simplified path
+    unsigned int* solution,                 // Output: [nonce, found_flag]
+    unsigned char* found_hash_out           // Output: 32-byte hash when found
+) {
+    // For now, delegate to ethash_mine with simplified logic
+    (void)dag; (void)dag_bytes; (void)num_nonces; (void)target_be;
+    ethash_mine(block_header, nonce_start, solution, 0x0000FFFFu, found_hash_out);
 }

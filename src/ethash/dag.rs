@@ -1,16 +1,14 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Minimal Etchash/Ethash DAG information
+/// Minimal Etchash/Ethash DAG information used by the miner backend
 #[derive(Debug, Clone)]
 pub struct DagInfo {
     pub epoch: u64,
-    pub seed_hash: [u8; 32],
     pub dataset_bytes: u64,
     pub cache_bytes: u64,
     pub dataset_path: PathBuf,
-    pub cache_path: PathBuf,
 }
 
 /// PoW algorithms supported for DAG sizing
@@ -25,8 +23,7 @@ pub const ETHASH_EPOCH_LENGTH: u64 = 30_000;
 /// ETCHASH epoch length in blocks (ECIP-1099)
 pub const ETCHASH_EPOCH_LENGTH: u64 = 60_000;
 
-/// Compute epoch from block height
-pub fn epoch_from_height(height: u64) -> u64 { height / ETHASH_EPOCH_LENGTH }
+// Compute epoch from block height is done via algo-aware helper below
 
 /// Compute epoch from block height based on algorithm
 pub fn epoch_from_height_for_algo(height: u64, algo: PowAlgo) -> u64 {
@@ -45,14 +42,7 @@ pub fn default_dag_dir() -> PathBuf {
     }
 }
 
-fn parse_seed_hash(hex: &str) -> Result<[u8; 32]> {
-    let h = hex.trim_start_matches("0x");
-    let bytes = hex::decode(h)?;
-    if bytes.len() != 32 { return Err(anyhow!("Invalid seed hash length: {}", bytes.len())); }
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes);
-    Ok(out)
-}
+// Seed hash parsing not required for current flow; height drives epoch selection.
 
 /// Simple primality test for Ethash size rounding
 fn is_prime(n: u64) -> bool {
@@ -98,14 +88,11 @@ fn dataset_filename(epoch: u64) -> String {
     format!("etchash-DAG-epoch-{:05}.bin", epoch)
 }
 
-fn cache_filename(epoch: u64) -> String {
-    format!("etchash-CACHE-epoch-{:05}.bin", epoch)
-}
+// Cache file naming omitted (not used by the current GPU path)
 
 /// Prepare DAG info from pool job data (seed hash and optional height)
 /// If `algo_hint` is Some("etchash"), use Etchash epoch sizing; otherwise default to Ethash.
-pub fn prepare_from_pool(seed_hash_hex: &str, height: Option<u64>, algo_hint: Option<&str>) -> Result<DagInfo> {
-    let seed_hash = parse_seed_hash(seed_hash_hex)?;
+pub fn prepare_from_pool(_seed_hash_hex: &str, height: Option<u64>, algo_hint: Option<&str>) -> Result<DagInfo> {
     // Detect algorithm from hint (case-insensitive), default to Ethash
     let pow_algo = match algo_hint.map(|s| s.to_ascii_lowercase()) {
         Some(a) if a.contains("etchash") => PowAlgo::Etchash,
@@ -123,9 +110,7 @@ pub fn prepare_from_pool(seed_hash_hex: &str, height: Option<u64>, algo_hint: Op
     fs::create_dir_all(&dir).ok();
 
     let dataset_path = dir.join(dataset_filename(epoch));
-    let cache_path = dir.join(cache_filename(epoch));
-
-    Ok(DagInfo { epoch, seed_hash, dataset_bytes, cache_bytes, dataset_path, cache_path })
+    Ok(DagInfo { epoch, dataset_bytes, cache_bytes, dataset_path })
 }
 
 /// Check whether dataset file exists and meets minimal size

@@ -1,15 +1,19 @@
 # rust-miner
 
-High-performance GPU cryptocurrency miner written in Rust. CUDA-only, future-proof architecture with dynamic algorithm dispatch.
+High-performance cryptocurrency miner written in Rust. **CUDA-only architecture** with dynamic algorithm dispatch.
 
-• Cross-Platform: Linux and Windows
-• GPU Required: NVIDIA GPU with CUDA (no CPU mining)
+• Cross-Platform: Linux and Windows  
+• **NVIDIA GPU Required:** No CPU mining, no AMD/Intel GPU support  
+• **CUDA-only:** No OpenCL, no CPU fallback
 
 ## ⚡ Features
 
 - CUDA-only backend (NVIDIA GPUs)
+- **Modular algorithm architecture** – easily add new mining algorithms
+- Multiple algorithm support:
+  - **QHash**: QubitCoin quantum PoW (~295 MH/s on GTX 1660 SUPER)
+  - **Ethash**: Ethereum Classic (placeholder, GPU impl pending)
 - Dynamic algorithm dispatch via trait-based backend
-- QHash (quantum PoW) implemented on CUDA
 - Stratum V1 protocol (subscribe, notify, submit)
 - Kernel returns final hash directly (no CPU recomputation)
 - Adaptive batch sizing (targets ~700–900 ms per kernel)
@@ -69,7 +73,7 @@ For detailed setup instructions, see [QUICKSTART.md](QUICKSTART.md) or [SETUP.md
 - OS: Linux (Ubuntu 22.04+) or Windows 11
 - CUDA Toolkit 12.0+
 
-⚠️ This application requires an NVIDIA GPU with CUDA support. Systems without compatible NVIDIA hardware cannot mine.
+⚠️ **CUDA-Only Mining:** This application requires an NVIDIA GPU with CUDA support. There is no CPU mining, no AMD/Intel GPU support, and no fallback mining mode. Systems without compatible NVIDIA hardware cannot mine.
 
 ## 🔧 Build & Test
 
@@ -128,7 +132,10 @@ Key ideas:
 - Efficient non-blocking driver polling
 
 Supported algorithms:
-- qhash
+- **qhash** – QubitCoin quantum PoW (fully implemented on CUDA)
+- **ethash** – Ethereum Classic PoW (placeholder, CPU-based for now)
+
+For details on adding new algorithms, see [MODULAR_ALGORITHMS.md](./MODULAR_ALGORITHMS.md)
 
 ## 🧪 Testing
 
@@ -159,21 +166,7 @@ cargo clippy -- -D warnings
 
 ## 🎯 Usage
 
-```bash
-# Basic usage
-rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f.RIG-1 --pass x
-
-# With specific GPU
-rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f.RIG-1 --gpu 0
-
-# Debug mode
-rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user bc1qacadts4usj2tjljwdemfu44a2tq47hch33fc6f.RIG-1 --debug
-
-# Help
-rust-miner --help
-```
-
-**Example with Qubitcoin pool**:
+### QHash (QubitCoin)
 ```bash
 ./target/release/rust-miner \
   --algo qhash \
@@ -182,7 +175,63 @@ rust-miner --help
   --pass x
 ```
 
+### Ethash (Ethereum Classic) - Placeholder
+```bash
+./target/release/rust-miner \
+  --algo ethash \
+  --url ethermine.org:4444 \
+  --user your-wallet.worker \
+  --pass x
+```
+
+### Common Options
+```bash
+# Use specific GPU (0, 1, 2, etc.)
+--gpu 0
+
+# Use multiple GPUs
+--gpu 0,1,2
+
+# Enable debug logging
+--debug
+
+# View all options
+--help
+```
+
+### More Examples
+```bash
+# Debug mode with QHash
+rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user wallet.worker --debug
+
+# Multiple GPUs
+rust-miner --algo qhash --url qubitcoin.luckypool.io:8610 --user wallet.worker --gpu 0,1
+
+# Benchmark mode (no pool)
+rust-miner --algo qhash --benchmark
+```
+
 Tip: backend is initialized before pool connect to fail-fast on unsupported --algo.
+
+## 📋 Logging
+
+Control logging output via the `RUST_LOG` environment variable:
+
+```bash
+# Production (recommended) - show important events
+RUST_LOG=info cargo run --release
+
+# Development - show all events including traces
+RUST_LOG=trace cargo run
+
+# Troubleshooting - focus on specific modules
+RUST_LOG=rust_miner::stratum=debug,rust_miner::cuda=debug cargo run
+
+# Detailed pool protocol debugging
+RUST_LOG=rust_miner::stratum=trace cargo run
+```
+
+For more details, see [LOGGING_STRATEGY.md](LOGGING_STRATEGY.md).
 
 ## 🤝 Contributing
 

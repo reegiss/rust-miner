@@ -9,13 +9,13 @@ mod cuda;
 mod gpu;
 mod mining;
 mod stratum;
+mod ethash;
 
 use backend::MiningBackend;
 use cli::{Args, display_banner};
 use gpu::{detect_gpus, select_gpus, GpuDevice};
 use mining::MiningStats;
 use stratum::{StratumClient, StratumConfig};
-use rust_miner::ethash::dag as ethdag;
 use std::collections::VecDeque;
 use std::process::Command;
 use std::time::Duration;
@@ -509,55 +509,7 @@ async fn main() -> Result<()> {
     println!("\n{}", "=== Mining Status ===".cyan().bold());
     println!("{}", "Waiting for jobs from pool...".yellow());
 
-    // If Ethash was requested, prepare DAG from first notify and exit (no mining yet)
-    let ethash_prepare_only = args.algo.eq_ignore_ascii_case("ethash");
-    if ethash_prepare_only {
-        // Wait for first job
-        let job_opt = {
-            let sc = std::sync::Arc::new(tokio::sync::Mutex::new(stratum_client));
-            let lock = sc.clone();
-            let mut job = None;
-            for _ in 0..30 { // wait up to ~30 seconds
-                if let Some(j) = lock.lock().await.get_job().await { job = Some(j); break; }
-                tokio::time::sleep(Duration::from_millis(1000)).await;
-            }
-            job
-        };
-
-        match job_opt {
-            Some(job) => {
-                if let Some(seed) = job.seed_hash.as_ref() {
-                    let height = job.height;
-                    let info = ethdag::prepare_from_pool(
-                        seed,
-                        height,
-                        job.algo.as_deref(),
-                    )?;
-                    println!("DAG info: epoch {} | dataset ~{:.2} MB | path {}",
-                        info.epoch,
-                        (info.dataset_bytes as f64) / (1024.0 * 1024.0),
-                        info.dataset_path.display());
-                    if ethdag::dataset_on_disk(&info) {
-                        println!("DAG dataset detected on disk: {}", info.dataset_path.display());
-                        println!("Exiting (DAG preparation only). Next step: GPU upload + kernel integration. CPU generation is disabled.");
-                        return Ok(())
-                    } else {
-                        eprintln!("{}", "DAG dataset not found on disk.".yellow());
-                        eprintln!("Expected path: {}", info.dataset_path.display());
-                        eprintln!("{}", "CPU DAG generation is disabled (too slow). We'll add a GPU-only generator to create/upload the DAG.".yellow());
-                        std::process::exit(1);
-                    }
-                } else {
-                    eprintln!("{}", "Pool job did not include seed_hash. Cannot prepare DAG.".red());
-                    std::process::exit(1);
-                }
-            }
-            None => {
-                eprintln!("{}", "Timeout waiting for mining.notify to prepare DAG.".red());
-                std::process::exit(1);
-            }
-        }
-    }
+    // Proceed directly to mining; Ethash DAG upload to VRAM happens in the backend on first job.
     
     // Channel for GPU workers to send statistics and shares to main thread
     let (stats_tx, mut stats_rx) = mpsc::channel::<GpuMiningResult>(32);

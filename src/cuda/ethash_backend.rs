@@ -3,11 +3,12 @@
 /// This module implements a simplified Ethash miner for Ethereum Classic.
 /// Note: This is a simplified implementation for demonstration purposes.
 /// A full Ethash implementation would require DAG memory management and proper Keccak mixing.
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crate::backend::{MiningBackend, MiningResult, GpuInfo};
 use crate::stratum::StratumJob;
 use crate::mining::{calculate_merkle_root, nbits_to_target, hex_to_u32_le, hex_to_bytes_be};
 use super::EthashCudaMiner;
+use crate::ethash::dag::{prepare_from_pool, dataset_on_disk};
 
 /// Ethash mining backend using CUDA
 pub struct EthashCudaBackend {
@@ -45,6 +46,27 @@ impl MiningBackend for EthashCudaBackend {
         let mut difficulty_target = 0u32;
 
         if let Some(header_hash_hex) = &job.header_hash {
+            // Ethash/Etchash path
+            // Ensure DAG exists on disk (GPU-only policy: no CPU generation)
+            if let Some(seed_hex) = &job.seed_hash {
+                let dag_info = prepare_from_pool(seed_hex, job.height, job.algo.as_deref())?;
+                tracing::info!(
+                    epoch = dag_info.epoch,
+                    dataset_mb = (dag_info.dataset_bytes as f64)/(1024.0*1024.0),
+                    cache_kb = (dag_info.cache_bytes as f64)/1024.0,
+                    path = %dag_info.dataset_path.display(),
+                    "DAG info prepared"
+                );
+                if !dataset_on_disk(&dag_info) {
+                    return Err(anyhow!(
+                        "DAG not found on disk. Expected at: {} ({} MB). Please download or generate the production DAG with a GPU and retry.",
+                        dag_info.dataset_path.display(),
+                        (dag_info.dataset_bytes as f64)/(1024.0*1024.0)
+                    ));
+                }
+                // Load DAG into VRAM (cached by size)
+                self.miner.ensure_dag_loaded(&dag_info.dataset_path)?;
+            }
             // Ethash mode: Use provided header hash
             let header_hash = hex_to_bytes_be(header_hash_hex)?;
             if header_hash.len() <= 76 {
@@ -100,21 +122,17 @@ impl MiningBackend for EthashCudaBackend {
         
         // Mine on GPU
         tracing::debug!("Starting GPU mine_job with {} nonces", num_nonces);
-        let result_nonce = self.miner.mine_job(&header_76, start_nonce, num_nonces, difficulty_target)?;
+        let result = self.miner.mine_job(&header_76, start_nonce, num_nonces, difficulty_target)?;
         
-        if result_nonce.is_some() {
-             tracing::info!("GPU mine_job finished. Found nonce: {:?}", result_nonce);
+        if let Some((nonce, hash)) = result.as_ref() {
+             tracing::info!("GPU mine_job finished. Found nonce: 0x{:08x}", *nonce);
+             tracing::debug!("Found hash: {}", hex::encode(hash));
         }
         
-        // If nonce found, we need to compute the hash (or get it from GPU if we updated the kernel)
-        // For now, if we find a nonce, we return it. The pool will validate it.
-        // We don't have the hash here unless we recompute it or fetch it from GPU.
-        // Since the kernel is simplified, the hash might not be correct anyway.
-        
         Ok(MiningResult {
-            found_share: result_nonce.is_some(),
-            nonce: result_nonce,
-            hash: None, // We don't have the hash yet
+            found_share: result.is_some(),
+            nonce: result.as_ref().map(|(n, _)| *n),
+            hash: result.map(|(_, h)| Box::new(h)),
             hashes_computed: (num_nonces as u64),
         })
     }

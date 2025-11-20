@@ -5,3 +5,4 @@ pub mod cuda;
 pub mod gpu;
 pub mod mining;
 pub mod stratum;
+pub mod ethash;
