@@ -111,6 +111,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Requires CUDA hardware
     fn test_detect_cuda_devices() {
         match detect_cuda_devices() {
             Ok(devices) => {
