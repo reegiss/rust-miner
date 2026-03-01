@@ -33,12 +33,30 @@ pub fn epoch_from_height_for_algo(height: u64, algo: PowAlgo) -> u64 {
     }
 }
 
-/// Default DAG directory: ~/.cache/rust-miner/dag
+/// Sub-path appended to the OS cache base for DAG storage
+const DAG_SUBDIR: [&str; 2] = ["rust-miner", "dag"];
+
+/// Default DAG directory: OS-appropriate cache dir + rust-miner/dag
 pub fn default_dag_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("HOME") {
-        Path::new(&home).join(".cache").join("rust-miner").join("dag")
-    } else {
-        PathBuf::from("dag")
+    let base: Option<PathBuf> = {
+        #[cfg(target_os = "windows")]
+        {
+            std::env::var("LOCALAPPDATA")
+                .or_else(|_| std::env::var("APPDATA"))
+                .ok()
+                .map(PathBuf::from)
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::env::var("HOME")
+                .ok()
+                .map(|h| Path::new(&h).join(".cache").to_path_buf())
+        }
+    };
+
+    match base {
+        Some(b) => DAG_SUBDIR.iter().fold(b, |p, c| p.join(c)),
+        None => DAG_SUBDIR.iter().fold(PathBuf::new(), |p, c| p.join(c)),
     }
 }
 
@@ -116,6 +134,7 @@ pub fn prepare_from_pool(_seed_hash_hex: &str, height: Option<u64>, algo_hint: O
 /// Check whether dataset file exists and meets minimal size
 pub fn dataset_on_disk(info: &DagInfo) -> bool {
     if let Ok(meta) = fs::metadata(&info.dataset_path) {
-        meta.is_file() && meta.len() >= info.dataset_bytes / 2 // tolerant lower bound for now
+        // Require at least 95% of the expected size to guard against truncated/corrupt files
+        meta.is_file() && meta.len() >= info.dataset_bytes * 95 / 100
     } else { false }
 }

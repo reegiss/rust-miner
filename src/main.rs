@@ -378,7 +378,7 @@ async fn main() -> Result<()> {
     println!("{:<15} {}", "Algorithm:".green(), args.algo.bright_white());
     println!("{:<15} {}", "Pool URL:".green(), args.url.bright_white());
     println!("{:<15} {}", "Wallet:".green(), args.user.bright_white());
-    println!("{:<15} {}", "Password:".green(), args.pass.bright_white());
+    println!("{:<15} {}", "Password:".green(), "***".bright_white());
     
     if let Some(ref gpu) = args.gpu {
         println!("{:<15} {}", "GPU:".green(), gpu.bright_white());
@@ -674,16 +674,6 @@ async fn main() -> Result<()> {
                 print_multi_gpu_stats(&gpu_miners_locked, &global_stats, start_time).await?;
             }
         }
-        
-        // Display statistics every 5 jobs (disabled - now using periodic sampling)
-        if false {
-            println!("\n{}", "=== Statistics ===".cyan());
-            println!("   {} {}", "Total Hashes:".green(), global_stats.hashes);
-            println!("   {} {}", "Shares Found:".green(), global_stats.shares_found);
-            // Print multi-GPU statistics block (best-effort)
-            let gpu_miners_locked = gpu_miners_display.lock().await;
-            print_multi_gpu_stats(&gpu_miners_locked, &global_stats, start_time).await?;
-        }
     }
 
     Ok(())
@@ -734,7 +724,7 @@ async fn print_multi_gpu_stats(
     let mut total_rate15m = 0.0;
     let mut total_power = 0.0;
 
-    for (idx, gpu) in gpu_miners.iter().enumerate() {
+    for gpu in gpu_miners.iter() {
         // Use moving averages for accurate rate calculations
         let rate10 = gpu.stats.get_average_hashrate(10);
         let rate60 = gpu.stats.get_average_hashrate(60);
@@ -745,7 +735,7 @@ async fn print_multi_gpu_stats(
         total_rate15m += rate15m;
 
         // Get GPU stats (placeholder - would need actual monitoring)
-        let gstat = get_gpu_stats(idx).unwrap_or((None, None, None, None, None));
+        let gstat = get_gpu_stats(gpu.device.id).unwrap_or((None, None, None, None, None));
 
         // Calculate efficiency (MH/s per Watt) using 10s average
         let efficiency = if let Some(power) = gstat.2 {
@@ -762,7 +752,7 @@ async fn print_multi_gpu_stats(
 
         // Per-device row
         writeln!(buf, " #{} {:26} {:9.2} MH/s  {}C  {}%  {:.1}W {:.3} {} {}     {}   {}   -",
-            idx,
+            gpu.device.id,
             gpu.device_info.name,
             rate10 / 1_000_000.0,
             gstat.0.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string()),
@@ -778,7 +768,7 @@ async fn print_multi_gpu_stats(
         
         // Log device specifications for trace-level debugging
         tracing::trace!("GPU #{}: {} MB memory, {} compute units, {} MHz clock",
-            idx, gpu.device_info.memory_mb, gpu.device_info.compute_units, gpu.device_info.clock_mhz);
+            gpu.device.id, gpu.device_info.memory_mb, gpu.device_info.compute_units, gpu.device_info.clock_mhz);
     }
 
     writeln!(buf, "----------------------------------------------------------------------------------------").ok();
